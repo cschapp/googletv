@@ -1,15 +1,20 @@
 package dev.craig.reel
 
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.text.format.DateUtils
+import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -20,6 +25,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import coil.load
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -237,6 +243,11 @@ class MainActivity : ComponentActivity() {
             pendingRow = "search:$q"
             if (!changed && standardGenres.isNotEmpty()) applyPendingRow()
         }
+        // --es open tv:95480 : open the detail panel for a TMDB id.
+        i?.getStringExtra("open")?.takeIf { it.isNotBlank() }?.let { ref ->
+            pendingRow = "open:$ref"
+            if (!changed && standardGenres.isNotEmpty()) applyPendingRow()
+        }
         return changed
     }
 
@@ -247,6 +258,14 @@ class MainActivity : ComponentActivity() {
         pendingRow = null
         if (name.startsWith("search:")) {
             search(name.removePrefix("search:"))
+            return
+        }
+        if (name.startsWith("open:")) {
+            val (kind, id) = name.removePrefix("open:").split(':').let { it.getOrNull(0) to it.getOrNull(1)?.toIntOrNull() }
+            val type = MediaType.entries.firstOrNull { it.path == kind }
+            val client = tmdb
+            if (type == null || id == null || client == null) return toast("Bad open ref “$name”")
+            lifecycleScope.launch { attempt { client.details(type, id) }?.let { onTitleClicked(it) } ?: toast("TMDB has no $kind $id") }
             return
         }
         val choice = when (name) {
@@ -661,49 +680,142 @@ class MainActivity : ComponentActivity() {
 
     // ---------- Opening a title ----------
 
+    /** Open the detail panel: what it is, who's in it, and where you can watch it. */
     private fun onTitleClicked(t: Title) {
         val client = tmdb ?: return
-        lifecycleScope.launch {
-            val lookup = try {
-                coroutineScope {
-                    val a = async { client.availability(t.type, t.id, prefs.region) }
-                    // Links are a nice-to-have; a JustWatch hiccup must not block opening the app.
-                    val o = async {
-                        try {
-                            JustWatch.offers(t, prefs.region)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            emptyList()
-                        }
-                    }
-                    a.await() to o.await()
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                toast("Couldn't check where ${t.name} is streaming: ${e.message}")
-                return@launch
-            }
-            val (avail, offers) = lookup
-            val enabled = enabledServices()
-            var streaming = enabled.filter { svc -> svc.hasAny(avail.stream) }
-            var youtubeGone = false
-            if (streaming.any { it.label == YOUTUBE } && !playableOnYouTube(t, offers)) {
-                streaming = streaming.filter { it.label != YOUTUBE }
-                youtubeGone = true
-            }
-            when (streaming.size) {
-                0 -> showUnavailable(t, avail, offers, youtubeGone)
-                1 -> openOn(streaming[0], t, offers)
-                else -> AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Watch “${t.name}” on")
-                    .setItems(streaming.map { it.label }.toTypedArray()) { _, which ->
-                        openOn(streaming[which], t, offers)
-                    }
-                    .show()
+        val dialog = Dialog(this, R.style.Theme_Reel_Detail)
+        dialog.setContentView(R.layout.dialog_detail)
+        val v = DetailViews(dialog)
+
+        v.title.text = t.name
+        v.meta.text = t.year
+        dialog.setOnDismissListener { detailJob?.cancel() }
+        dialog.show()
+        v.poster.load(t.posterPath?.let { Tmdb.IMAGE_BASE + it }) {
+            placeholder(R.drawable.poster_placeholder)
+            error(R.drawable.poster_placeholder)
+            listener(onError = { _, r -> Log.w(TAG, "poster failed", r.throwable) })
+        }
+
+        detailJob = lifecycleScope.launch {
+            coroutineScope {
+                val d = async { attempt { client.detail(t.type, t.id) } }
+                val a = async { attempt { client.availability(t.type, t.id, prefs.region) } }
+                // Links are a nice-to-have; a JustWatch hiccup must not block opening the app.
+                val o = async { attempt { JustWatch.offers(t, prefs.region) } ?: emptyList() }
+                val detail = d.await()
+                if (detail != null) bindDetail(v, detail) else v.overview.text = "Couldn't load details from TMDB."
+                bindActions(dialog, v, t, a.await(), o.await(), detail?.trailerKey)
             }
         }
+    }
+
+    private var detailJob: Job? = null
+
+    private class DetailViews(d: Dialog) {
+        val backdrop: ImageView = d.findViewById(R.id.detailBackdrop)
+        val poster: ImageView = d.findViewById(R.id.detailPoster)
+        val title: TextView = d.findViewById(R.id.detailTitle)
+        val meta: TextView = d.findViewById(R.id.detailMeta)
+        val tagline: TextView = d.findViewById(R.id.detailTagline)
+        val overview: TextView = d.findViewById(R.id.detailOverview)
+        val cast: TextView = d.findViewById(R.id.detailCast)
+        val where: TextView = d.findViewById(R.id.detailWhere)
+        val actions: LinearLayout = d.findViewById(R.id.detailActions)
+        val progress: View = d.findViewById(R.id.detailProgress)
+    }
+
+    private fun bindDetail(v: DetailViews, d: TitleDetail) {
+        v.backdrop.load(d.backdropPath?.let { Tmdb.BACKDROP_BASE + it }) {
+            crossfade(true)
+            listener(onError = { _, r -> Log.w(TAG, "backdrop failed", r.throwable) })
+        }
+        val parts = mutableListOf<String>()
+        if (d.title.year.isNotBlank()) parts += d.title.year
+        if (d.title.type == MediaType.MOVIE) {
+            if (d.runtimeMin > 0) parts += "${d.runtimeMin / 60}h ${d.runtimeMin % 60}m".removePrefix("0h ")
+        } else {
+            if (d.seasons > 0) parts += "${d.seasons} season${if (d.seasons == 1) "" else "s"}"
+            if (d.episodes > 0) parts += "${d.episodes} episode${if (d.episodes == 1) "" else "s"}"
+            if (d.ended) parts += "Ended"
+        }
+        if (d.votes > 0) parts += "★ ${"%.1f".format(d.rating)}"
+        if (d.genres.isNotEmpty()) parts += d.genres.joinToString(", ")
+        v.meta.text = parts.joinToString("   ·   ")
+        v.tagline.text = d.tagline
+        v.tagline.visibility = if (d.tagline.isBlank()) View.GONE else View.VISIBLE
+        v.overview.text = d.overview.ifBlank { "No description on TMDB." }
+        v.cast.text = "Starring ${d.cast.joinToString(", ")}"
+        v.cast.visibility = if (d.cast.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** Fill the button row once availability is known; the first button takes focus. */
+    private suspend fun bindActions(
+        dialog: Dialog,
+        v: DetailViews,
+        t: Title,
+        avail: Availability?,
+        offers: List<Offer>,
+        trailerKey: String?,
+    ) {
+        v.progress.visibility = View.GONE
+        var streaming = if (avail == null) emptyList() else enabledServices().filter { it.hasAny(avail.stream) }
+        var youtubeGone = false
+        if (streaming.any { it.label == YOUTUBE } && !playableOnYouTube(t, offers)) {
+            streaming = streaming.filter { it.label != YOUTUBE }
+            youtubeGone = true
+        }
+        val rentOn = if (avail == null) emptyList() else installed.filter { it.hasAny(avail.rentBuy) && it !in streaming }
+        // Providers that stream it and aren't one of your installed apps, matched by id (so
+        // "Amazon Prime Video" counts as the Prime Video app, not as somewhere else).
+        val mine = installed.flatMap { providerIds[it.label] ?: emptySet() }.toSet()
+        val elsewhere = if (avail == null) emptyList() else names(avail.stream.filter { it !in mine }.toSet())
+
+        v.where.text = when {
+            avail == null -> "Couldn't check where it's streaming right now."
+            streaming.isNotEmpty() -> buildString {
+                append("Included with ${streaming.joinToString(", ") { it.label }}")
+                if (elsewhere.isNotEmpty()) append("   ·   also on ${elsewhere.joinToString(", ")}")
+            }
+            else -> buildString {
+                append("Not included with any of your streaming apps right now.")
+                if (youtubeGone) append(" The free YouTube copy has been taken down.")
+                if (elsewhere.isNotEmpty()) append("\nStreaming on ${elsewhere.joinToString(", ")}.")
+            }
+        }
+
+        fun chip(label: String, onClick: () -> Unit): TextView {
+            val tv = layoutInflater.inflate(R.layout.item_action, v.actions, false) as TextView
+            tv.text = label
+            tv.setOnClickListener { onClick() }
+            v.actions.addView(tv)
+            return tv
+        }
+        for (svc in streaming) chip("▶  Watch on ${svc.label}") { dialog.dismiss(); openOn(svc, t, offers) }
+        for (svc in rentOn) chip("Rent or buy on ${svc.label}") { dialog.dismiss(); openOn(svc, t, offers) }
+        if (trailerKey != null) chip("Trailer") { openTrailer(trailerKey) }
+        chip("Close") { dialog.dismiss() }
+        // Index 0 is the (hidden) progress spinner; focus the first real button once it's laid out.
+        v.actions.getChildAt(1)?.let { first -> first.post { first.requestFocus() } }
+    }
+
+    private fun openTrailer(key: String) {
+        val url = "https://www.youtube.com/watch?v=$key"
+        val yt = ProviderCatalog.apps.first { it.label == YOUTUBE }.packages
+            .firstOrNull { Launch.launchIntent(packageManager, it) != null }
+        val direct = yt?.let { Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage(it) }
+        if (direct == null || !Launch.start(this, direct)) {
+            if (!Launch.start(this, Intent(Intent.ACTION_VIEW, Uri.parse(url)))) toast("No app can play the trailer")
+        }
+    }
+
+    /** Run [block], returning null on failure. Cancellation still propagates. */
+    private suspend fun <T> attempt(block: suspend () -> T): T? = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
     }
 
     private fun InstalledService.hasAny(ids: Set<Int>) = (providerIds[label] ?: emptySet()).any { it in ids }
@@ -728,25 +840,6 @@ class MainActivity : ComponentActivity() {
             .distinct()
         if (ids.isEmpty()) return false
         return ids.any { YouTube.isPublic(it) }
-    }
-
-    /** None of the enabled apps streams it: say where it actually is, and offer rent/buy on an installed app. */
-    private fun showUnavailable(t: Title, avail: Availability, offers: List<Offer>, youtubeGone: Boolean = false) {
-        val installedLabels = installed.map { it.label }.toSet()
-        val streamingElsewhere = names(avail.stream).filter { it !in installedLabels }
-        val rentOn = installed.filter { it.hasAny(avail.rentBuy) }
-        val msg = buildString {
-            append("“${t.name}” isn't included with any of your streaming apps right now.")
-            if (youtubeGone) append("\n\nThe free YouTube copy has been taken down.")
-            if (streamingElsewhere.isNotEmpty()) append("\n\nStreaming on: ${streamingElsewhere.joinToString(", ")}")
-            if (rentOn.isNotEmpty()) append("\n\nRent or buy on: ${rentOn.joinToString(", ") { it.label }}")
-        }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(t.name)
-            .setMessage(msg)
-            .setNegativeButton("OK", null)
-        if (rentOn.size == 1) dialog.setPositiveButton("Open ${rentOn[0].label}") { _, _ -> openOn(rentOn[0], t, offers) }
-        dialog.show()
     }
 
     /** Human-readable provider names, collapsing TMDB's variants ("Netflix", "Netflix Standard with Ads"). */
@@ -1043,6 +1136,7 @@ class MainActivity : ComponentActivity() {
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     companion object {
+        private const val TAG = "Reel"
         private const val GRID_COLUMNS = 7
         private const val YOUTUBE = "YouTube"
         /** Pull more discover pages in one go until at least this many verified titles turn up. */

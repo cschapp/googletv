@@ -8,6 +8,22 @@
         <item name="android:windowDisablePreview">true</item>
     </style>
 
+    <!-- Full-screen title panel; Back dismisses it like any dialog. -->
+    <style name="Theme.Reel.Detail" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+        <item name="android:colorAccent">@color/accent</item>
+    </style>
+
+    <style name="ActionChip" parent="Chip">
+        <item name="android:textSize">17sp</item>
+        <item name="android:paddingStart">22dp</item>
+        <item name="android:paddingEnd">22dp</item>
+        <item name="android:paddingTop">11dp</item>
+        <item name="android:paddingBottom">11dp</item>
+    </style>
+
     <style name="Chip">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>

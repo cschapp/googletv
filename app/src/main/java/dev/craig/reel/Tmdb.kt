@@ -35,6 +35,27 @@ data class Title(
 
 data class ResultPage(val page: Int, val totalPages: Int, val items: List<Title>)
 
+/** Everything the detail panel shows about one title. */
+data class TitleDetail(
+    val title: Title,
+    val tagline: String,
+    val overview: String,
+    val backdropPath: String?,
+    /** 0..10, or 0 when unrated. */
+    val rating: Double,
+    val votes: Int,
+    val genres: List<String>,
+    /** Minutes; a movie's length or a show's typical episode. 0 when unknown. */
+    val runtimeMin: Int,
+    val seasons: Int,
+    val episodes: Int,
+    /** Finished airing (shows only). */
+    val ended: Boolean,
+    val cast: List<String>,
+    /** YouTube video id of the best trailer, if any. */
+    val trailerKey: String?,
+)
+
 /** Where a title is available in a region: provider ids that stream it (subscription/free/ads) vs. rent/buy only. */
 data class Availability(val stream: Set<Int>, val rentBuy: Set<Int>) {
     companion object {
@@ -172,6 +193,45 @@ class Tmdb(private val key: String) {
         ResultPage(json.optInt("page", page), minOf(json.optInt("total_pages", 1), 500), items)
     }
 
+    /** Full details for the panel: credits and trailers come along in the same call. */
+    suspend fun detail(type: MediaType, id: Int): TitleDetail = withContext(Dispatchers.IO) {
+        val o = get("/${type.path}/$id", mapOf("language" to "en-US", "append_to_response" to "credits,videos"))
+        val genres = o.optJSONArray("genres")?.let { arr ->
+            (0 until arr.length()).map { arr.getJSONObject(it).optString("name") }.filter { it.isNotBlank() }
+        } ?: emptyList()
+        val cast = o.optJSONObject("credits")?.optJSONArray("cast")?.let { arr ->
+            (0 until minOf(arr.length(), 6)).map { arr.getJSONObject(it).optString("name") }.filter { it.isNotBlank() }
+        } ?: emptyList()
+        val trailer = o.optJSONObject("videos")?.optJSONArray("results")?.let { arr ->
+            val vids = (0 until arr.length()).map { arr.getJSONObject(it) }
+                .filter { it.optString("site") == "YouTube" && it.optString("key").isNotBlank() }
+            // Prefer an official trailer, then any trailer, then a teaser.
+            (vids.firstOrNull { it.optString("type") == "Trailer" && it.optBoolean("official") }
+                ?: vids.firstOrNull { it.optString("type") == "Trailer" }
+                ?: vids.firstOrNull { it.optString("type") == "Teaser" })?.optString("key")
+        }
+        val runtime = if (type == MediaType.MOVIE) {
+            o.optInt("runtime", 0)
+        } else {
+            o.optJSONArray("episode_run_time")?.takeIf { it.length() > 0 }?.optInt(0, 0) ?: 0
+        }
+        TitleDetail(
+            title = title(o, type),
+            tagline = o.optString("tagline"),
+            overview = o.optString("overview"),
+            backdropPath = o.optString("backdrop_path").takeIf { it.isNotBlank() && it != "null" },
+            rating = o.optDouble("vote_average", 0.0),
+            votes = o.optInt("vote_count", 0),
+            genres = genres,
+            runtimeMin = runtime,
+            seasons = o.optInt("number_of_seasons", 0),
+            episodes = o.optInt("number_of_episodes", 0),
+            ended = o.optString("status") in setOf("Ended", "Canceled"),
+            cast = cast,
+            trailerKey = trailer,
+        )
+    }
+
     /** Look up one title by id (for Trakt lists). Null when TMDB no longer has it. */
     suspend fun details(type: MediaType, id: Int): Title? = withContext(Dispatchers.IO) {
         try {
@@ -277,6 +337,7 @@ class Tmdb(private val key: String) {
     companion object {
         private const val BASE = "https://api.themoviedb.org/3"
         const val IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
+        const val BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
         fun normalize(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
     }
 }

@@ -39,7 +39,8 @@ object ProviderCatalog {
         ),
         StreamingApp(
             "Prime Video", listOf("com.amazon.amazonvideo.livingroom"),
-            { it.startsWith("amazonprimevideo") },
+            // "Amazon Video" is TMDB's name for the same app's rent/buy store.
+            { it.startsWith("amazonprimevideo") || it == "amazonvideo" },
         ),
         StreamingApp(
             "Tubi", listOf("com.tubitv"),
