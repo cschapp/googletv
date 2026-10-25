@@ -82,6 +82,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var btnMediaType: TextView
     private lateinit var btnSort: TextView
     private lateinit var weather: TextView
+    private lateinit var greeting: TextView
+    private lateinit var quoteView: TextView
 
     // Catalog state
     private var installed: List<InstalledService> = emptyList()
@@ -162,6 +164,8 @@ class MainActivity : ComponentActivity() {
         btnMediaType = findViewById(R.id.btnMediaType)
         btnSort = findViewById(R.id.btnSort)
         weather = findViewById(R.id.weather)
+        greeting = findViewById(R.id.greeting)
+        quoteView = findViewById(R.id.quote)
 
         appsRow.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
         appsRow.adapter = appAdapter
@@ -228,6 +232,55 @@ class MainActivity : ComponentActivity() {
         // The app row is rebuilt only when a package was installed, removed or updated while away.
         if (appsDirty) loadApps()
         startWeather()
+        startGreeting()
+    }
+
+    // ---------- Greeting ----------
+
+    private var greetingJob: Job? = null
+    private var currentQuote: Quote? = null
+
+    /** "Good evening, Craig" by the clock, and a movie line underneath that fades to a new one every so often. */
+    private fun startGreeting() {
+        greetingJob?.cancel()
+        greetingJob = lifecycleScope.launch {
+            while (true) {
+                updateGreeting()
+                showNextQuote()
+                delay(QUOTE_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun updateGreeting() {
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val name = prefs.userName
+        val base = when (hour) {
+            in 5..11 -> "Good morning"
+            in 12..16 -> "Good afternoon"
+            in 17..21 -> "Good evening"
+            else -> if (name.isBlank()) "Up late?" else "Up late"
+        }
+        greeting.text = when {
+            name.isBlank() -> if (base.endsWith("?")) base else "$base."
+            hour in 5..21 -> "$base, $name"
+            else -> "$base, $name?"
+        }
+    }
+
+    private fun showNextQuote() {
+        val q = Quotes.next(currentQuote)
+        currentQuote = q
+        if (quoteView.text.isNullOrEmpty()) {
+            quoteView.text = q.display
+            quoteView.alpha = 0f
+            quoteView.animate().alpha(1f).setDuration(600).start()
+        } else {
+            quoteView.animate().alpha(0f).setDuration(400).withEndAction {
+                quoteView.text = q.display
+                quoteView.animate().alpha(1f).setDuration(600).start()
+            }.start()
+        }
     }
 
     override fun onDestroy() {
@@ -247,6 +300,7 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         weatherJob?.cancel()
+        greetingJob?.cancel()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -278,6 +332,11 @@ class MainActivity : ComponentActivity() {
         i?.getStringExtra("weather")?.let {
             prefs.weatherQuery = it
             if (::weather.isInitialized) startWeather()
+        }
+        // --es name Craig : what the greeting calls you.
+        i?.getStringExtra("name")?.let {
+            prefs.userName = it
+            if (::greeting.isInitialized) updateGreeting()
         }
         // --es row continue|recent|trending|all|watchlist|foryou : jump to a row (handy from adb).
         i?.getStringExtra("row")?.let { name ->
@@ -1067,6 +1126,7 @@ class MainActivity : ComponentActivity() {
         val weatherLabel = "Weather location (${place?.name?.ifBlank { null } ?: prefs.weatherQuery.ifBlank { "auto" }})"
         val rentLabel = if (prefs.includedOnly) "Rent, buy & unavailable titles: hidden" else "Rent, buy & unavailable titles: shown"
         val items = arrayOf(
+            "Your name (${prefs.userName.ifBlank { "not set" }})",
             "Streaming apps",
             rentLabel,
             traktLabel,
@@ -1081,14 +1141,18 @@ class MainActivity : ComponentActivity() {
             .setTitle("Reel settings")
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> showProviderPicker()
-                    1 -> {
+                    0 -> promptText("Your name, for the greeting", prefs.userName) {
+                        prefs.userName = it
+                        updateGreeting()
+                    }
+                    1 -> showProviderPicker()
+                    2 -> {
                         prefs.includedOnly = !prefs.includedOnly
                         toast(if (prefs.includedOnly) "Showing only what's included with your apps" else "Showing rent, buy and unavailable titles too")
                         // Search and Continue watching are filtered differently now; redraw if one is open.
                         currentGenre?.takeIf { it.personal && it != GenreChoice.Recent }?.let { selectGenre(it) }
                     }
-                    2 -> when {
+                    3 -> when {
                         t == null -> linkTrakt()
                         t.isLinked -> {
                             t.unlink()
@@ -1098,7 +1162,7 @@ class MainActivity : ComponentActivity() {
                         }
                         else -> linkTrakt()
                     }
-                    3 -> promptText("Weather location (city or postcode, blank = auto)", prefs.weatherQuery) {
+                    4 -> promptText("Weather location (city or postcode, blank = auto)", prefs.weatherQuery) {
                         prefs.weatherQuery = it
                         lifecycleScope.launch {
                             val p = try { resolvePlace() } catch (e: Exception) { null }
@@ -1106,24 +1170,24 @@ class MainActivity : ComponentActivity() {
                             startWeather()
                         }
                     }
-                    4 -> promptText("TMDB API key", prefs.tmdbKey) {
+                    5 -> promptText("TMDB API key", prefs.tmdbKey) {
                         prefs.tmdbKey = it
                         initCatalog()
                     }
-                    5 -> promptText("Region (2-letter country code)", prefs.region) {
+                    6 -> promptText("Region (2-letter country code)", prefs.region) {
                         prefs.region = it
                         initCatalog()
                     }
-                    6 -> {
+                    7 -> {
                         prefs.hiddenApps = emptySet()
                         loadApps()
                     }
-                    7 -> {
+                    8 -> {
                         cache.clear()
                         toast("Cache cleared")
                         initCatalog()
                     }
-                    8 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
+                    9 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
                 }
             }
             .show()
@@ -1232,6 +1296,7 @@ class MainActivity : ComponentActivity() {
         /** Trakt lists are checked title by title; cap the work. */
         private const val MAX_LIST_ITEMS = 80
         private const val WEATHER_REFRESH_MS = 15 * 60_000L
+        private const val QUOTE_INTERVAL_MS = 20_000L
         /** Anything on disk older than this is useless to every endpoint, so sweep it at startup. */
         private const val CACHE_MAX_AGE_MS = 14 * DiskCache.DAY
     }
