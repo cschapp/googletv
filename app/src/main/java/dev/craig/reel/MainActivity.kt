@@ -2,9 +2,14 @@ package dev.craig.reel
 
 import android.app.AlertDialog
 import android.app.Dialog
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.format.DateUtils
 import android.util.Log
@@ -21,16 +26,19 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 
 class MainActivity : ComponentActivity() {
@@ -62,6 +70,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private lateinit var prefs: Prefs
+    private lateinit var cache: DiskCache
     private var tmdb: Tmdb? = null
 
     private lateinit var appsSection: View
@@ -132,10 +141,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val startedAt = SystemClock.elapsedRealtime()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         prefs = Prefs(this)
+        cache = DiskCache(cacheDir)
+        JustWatch.disk = cache
+        YouTube.disk = cache
+        lifecycleScope.launch(Dispatchers.IO) { cache.prune(CACHE_MAX_AGE_MS) }
         applyIntentExtras(intent)
 
         appsSection = findViewById(R.id.appsSection)
@@ -188,14 +203,45 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+        val packageFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        // System broadcasts still arrive at a non-exported receiver; the flag is required from API 33.
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(packageReceiver, packageFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(packageReceiver, packageFilter)
+        }
         loadApps()
         initCatalog()
+        mark("onCreate done")
     }
+
+    /** Startup timing in logcat: `adb logcat -s Reel:I`. */
+    private fun mark(what: String) = Log.i(TAG, "$what after ${SystemClock.elapsedRealtime() - startedAt} ms")
 
     override fun onResume() {
         super.onResume()
-        loadApps()
+        // The app row is rebuilt only when a package was installed, removed or updated while away.
+        if (appsDirty) loadApps()
         startWeather()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(packageReceiver)
+    }
+
+    private var appsDirty = false
+
+    private val packageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            appsDirty = true
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) loadApps()
+        }
     }
 
     override fun onPause() {
@@ -282,29 +328,41 @@ class MainActivity : ComponentActivity() {
 
     // ---------- Apps ----------
 
+    private var appsJob: Job? = null
+
+    /** Query installed apps and decode their banners off the main thread, then show them. */
     private fun loadApps() {
-        val pm = packageManager
-        val hidden = prefs.hiddenApps
-        val seen = HashSet<String>()
-        val entries = mutableListOf<AppEntry>()
-        for (category in listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)) {
-            @Suppress("DEPRECATION")
-            val infos = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(category), 0)
-            for (ri in infos) {
-                val ai = ri.activityInfo
-                val pkg = ai.packageName
-                if (pkg == packageName || pkg in hidden || !seen.add(pkg)) continue
-                entries += AppEntry(
-                    pkg = pkg,
-                    label = ri.loadLabel(pm).toString(),
-                    banner = ai.loadBanner(pm) ?: ai.applicationInfo?.loadBanner(pm),
-                    icon = ri.loadIcon(pm),
-                )
+        appsDirty = false
+        appsJob?.cancel()
+        appsJob = lifecycleScope.launch {
+            val pm = packageManager
+            val hidden = prefs.hiddenApps
+            val own = packageName
+            val entries = withContext(Dispatchers.IO) {
+                val seen = HashSet<String>()
+                val out = mutableListOf<AppEntry>()
+                for (category in listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)) {
+                    @Suppress("DEPRECATION")
+                    val infos = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(category), 0)
+                    for (ri in infos) {
+                        val ai = ri.activityInfo
+                        val pkg = ai.packageName
+                        if (pkg == own || pkg in hidden || !seen.add(pkg)) continue
+                        out += AppEntry(
+                            pkg = pkg,
+                            label = ri.loadLabel(pm).toString(),
+                            banner = ai.loadBanner(pm) ?: ai.applicationInfo?.loadBanner(pm),
+                            icon = ri.loadIcon(pm),
+                        )
+                    }
+                }
+                out
             }
+            // Your arranged order first, then everything else A–Z.
+            val rank = prefs.appOrder.withIndex().associate { it.value to it.index }
+            appAdapter.items = entries.sortedWith(compareBy({ rank[it.pkg] ?: Int.MAX_VALUE }, { it.label.lowercase() }))
+            mark("apps shown")
         }
-        // Your arranged order first, then everything else A–Z.
-        val rank = prefs.appOrder.withIndex().associate { it.value to it.index }
-        appAdapter.items = entries.sortedWith(compareBy({ rank[it.pkg] ?: Int.MAX_VALUE }, { it.label.lowercase() }))
     }
 
     private fun showAppMenu(e: AppEntry) {
@@ -403,7 +461,7 @@ class MainActivity : ComponentActivity() {
             showStatus(getString(R.string.no_key))
             return
         }
-        val client = Tmdb(key)
+        val client = Tmdb(key, cache)
         tmdb = client
         lifecycleScope.launch {
             showStatus("Loading…", busy = true)
@@ -412,6 +470,7 @@ class MainActivity : ComponentActivity() {
                 val providers = client.providers(MediaType.MOVIE, region) + client.providers(MediaType.TV, region)
                 providerIds = ProviderCatalog.mapIds(installed, providers)
                 providerNames = providers.associate { it.id to it.name }
+                mark("providers loaded")
                 loadGenres()
             }
         }
@@ -552,8 +611,9 @@ class MainActivity : ComponentActivity() {
         if (page == 0) showStatus("Loading…", busy = true)
         try {
             // Discover over-matches (see Tmdb.onlyStreamingOn), so a page can shrink to nothing
-            // after checking. Keep pulling pages until there's enough to show, within a cap.
-            val found = mutableListOf<Title>()
+            // after checking. Show each page's survivors as soon as they're known, and keep
+            // pulling pages until there's enough on screen, within a cap.
+            var found = 0
             var pulled = 0
             do {
                 val res = fetchPage(client, choice, page + 1)
@@ -561,7 +621,7 @@ class MainActivity : ComponentActivity() {
                 page = res.page
                 totalPages = res.totalPages
                 if (page == 1 && posterAdapter.itemCount == 0 && !raw) showStatus("Checking your apps…", busy = true)
-                found += if (raw) {
+                val keep = if (raw) {
                     res.items
                 } else {
                     client.onlyStreamingOn(res.items, ids, prefs.region) { t, on ->
@@ -570,9 +630,16 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (gen != generation) return
+                if (keep.isNotEmpty()) {
+                    if (posterAdapter.itemCount == 0) {
+                        hideStatus()
+                        mark("first posters shown")
+                    }
+                    posterAdapter.append(keep)
+                }
+                found += keep.size
                 pulled++
-            } while (found.size < MIN_BATCH && page < totalPages && pulled < MAX_PAGES_PER_BATCH)
-            posterAdapter.append(found)
+            } while (found < MIN_BATCH && page < totalPages && pulled < MAX_PAGES_PER_BATCH)
             if (posterAdapter.itemCount == 0) {
                 if (page < totalPages) {
                     // Nothing yet, but more pages remain; keep going on the next call.
@@ -1007,6 +1074,7 @@ class MainActivity : ComponentActivity() {
             "TMDB API key",
             "Region (${prefs.region})",
             "Unhide all apps",
+            "Clear cached TMDB data (${cache.sizeBytes() / 1024} KB)",
             "Android TV settings",
         )
         AlertDialog.Builder(this)
@@ -1050,7 +1118,12 @@ class MainActivity : ComponentActivity() {
                         prefs.hiddenApps = emptySet()
                         loadApps()
                     }
-                    7 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
+                    7 -> {
+                        cache.clear()
+                        toast("Cache cleared")
+                        initCatalog()
+                    }
+                    8 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
                 }
             }
             .show()
@@ -1159,5 +1232,7 @@ class MainActivity : ComponentActivity() {
         /** Trakt lists are checked title by title; cap the work. */
         private const val MAX_LIST_ITEMS = 80
         private const val WEATHER_REFRESH_MS = 15 * 60_000L
+        /** Anything on disk older than this is useless to every endpoint, so sweep it at startup. */
+        private const val CACHE_MAX_AGE_MS = 14 * DiskCache.DAY
     }
 }

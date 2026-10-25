@@ -7,6 +7,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -67,11 +68,31 @@ data class Availability(val stream: Set<Int>, val rentBuy: Set<Int>) {
  * Minimal TMDB client. Accepts either a v3 API key (sent as ?api_key=)
  * or a v4 read access token (sent as a Bearer header; these are long JWTs).
  */
-class Tmdb(private val key: String) {
+class Tmdb(private val key: String, private val cache: DiskCache? = null) {
 
     private val isBearer = key.length > 40
 
-    private fun get(path: String, params: Map<String, String> = emptyMap()): JSONObject {
+    /**
+     * GET a TMDB endpoint. With [ttlMs] > 0 the response is served from [cache] while younger
+     * than that, and a stale copy stands in when the network fails. Keys never include the API key.
+     */
+    private fun get(path: String, params: Map<String, String> = emptyMap(), ttlMs: Long = 0L): JSONObject {
+        val cacheKey = path + "?" + params.toSortedMap().entries.joinToString("&") { "${it.key}=${it.value}" }
+        val cached = if (ttlMs > 0) cache?.get(cacheKey) else null
+        if (cached != null && cached.ageMs < ttlMs) return JSONObject(cached.body)
+
+        val body = try {
+            fetch(path, params)
+        } catch (e: IOException) {
+            // Offline or TMDB hiccup: an old answer beats an empty screen.
+            if (cached != null && !e.message.orEmpty().startsWith("TMDB 4")) return JSONObject(cached.body)
+            throw e
+        }
+        if (ttlMs > 0) cache?.put(cacheKey, body)
+        return JSONObject(body)
+    }
+
+    private fun fetch(path: String, params: Map<String, String>): String {
         val all = if (isBearer) params else params + ("api_key" to key)
         val query = all.entries.joinToString("&") { (k, v) ->
             "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
@@ -90,34 +111,44 @@ class Tmdb(private val key: String) {
                 val msg = runCatching { JSONObject(body).optString("status_message") }.getOrNull()
                 throw IOException("TMDB $code${if (!msg.isNullOrBlank()) ": $msg" else ""}")
             }
-            return JSONObject(body)
+            return body
         } finally {
             conn.disconnect()
         }
     }
 
     suspend fun genres(type: MediaType): List<Genre> = withContext(Dispatchers.IO) {
-        val arr = get("/genre/${type.path}/list", mapOf("language" to "en-US")).optJSONArray("genres")
+        val arr = get("/genre/${type.path}/list", mapOf("language" to "en-US"), TTL_STATIC).optJSONArray("genres")
         (0 until (arr?.length() ?: 0)).map { i ->
             val o = arr!!.getJSONObject(i)
             Genre(o.getInt("id"), o.getString("name"))
         }
     }
 
+    /**
+     * All providers TMDB knows for the region. The full response is bulky (logos, priorities),
+     * so only the id/name pairs are kept on disk, as a small array that parses in no time.
+     */
     suspend fun providers(type: MediaType, region: String): List<ProviderInfo> = withContext(Dispatchers.IO) {
-        val arr = get(
-            "/watch/providers/${type.path}",
-            mapOf("watch_region" to region, "language" to "en-US"),
-        ).optJSONArray("results")
-        (0 until (arr?.length() ?: 0)).map { i ->
+        val compactKey = "providers/${type.path}/$region"
+        cache?.get(compactKey)?.takeIf { it.ageMs < TTL_STATIC }?.let { e ->
+            runCatching {
+                val arr = JSONArray(e.body)
+                (0 until arr.length()).map { i -> arr.getJSONArray(i).let { ProviderInfo(it.getInt(0), it.getString(1)) } }
+            }.getOrNull()?.let { return@withContext it }
+        }
+        val arr = get("/watch/providers/${type.path}", mapOf("watch_region" to region, "language" to "en-US")).optJSONArray("results")
+        val list = (0 until (arr?.length() ?: 0)).map { i ->
             val o = arr!!.getJSONObject(i)
             ProviderInfo(o.getInt("provider_id"), o.getString("provider_name"))
         }
+        cache?.put(compactKey, JSONArray().also { out -> list.forEach { out.put(JSONArray().put(it.id).put(it.name)) } }.toString())
+        list
     }
 
     /** Resolve a free-text genre ("folk horror") to a TMDB keyword tag. */
     suspend fun searchKeyword(query: String): Keyword? = withContext(Dispatchers.IO) {
-        val arr = get("/search/keyword", mapOf("query" to query, "page" to "1")).optJSONArray("results")
+        val arr = get("/search/keyword", mapOf("query" to query, "page" to "1"), TTL_STATIC).optJSONArray("results")
             ?: return@withContext null
         val all = (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
@@ -166,12 +197,12 @@ class Tmdb(private val key: String) {
         if (genreId != null) params["with_genres"] = genreId.toString()
         if (keywordId != null) params["with_keywords"] = keywordId.toString()
 
-        page(get("/discover/${type.path}", params), type, page)
+        page(get("/discover/${type.path}", params, TTL_LISTS), type, page)
     }
 
     /** This week's trending titles. No provider filter on TMDB's side; caller verifies each one. */
     suspend fun trending(type: MediaType, page: Int): ResultPage = withContext(Dispatchers.IO) {
-        page(get("/trending/${type.path}/week", mapOf("language" to "en-US", "page" to page.toString())), type, page)
+        page(get("/trending/${type.path}/week", mapOf("language" to "en-US", "page" to page.toString()), TTL_LISTS), type, page)
     }
 
     /** Free-text search across movies and shows at once; people and junk rows are dropped. */
@@ -179,6 +210,7 @@ class Tmdb(private val key: String) {
         val json = get(
             "/search/multi",
             mapOf("query" to query, "include_adult" to "false", "language" to "en-US", "page" to page.toString()),
+            TTL_LISTS,
         )
         val arr = json.optJSONArray("results")
         val items = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
@@ -195,7 +227,7 @@ class Tmdb(private val key: String) {
 
     /** Full details for the panel: credits and trailers come along in the same call. */
     suspend fun detail(type: MediaType, id: Int): TitleDetail = withContext(Dispatchers.IO) {
-        val o = get("/${type.path}/$id", mapOf("language" to "en-US", "append_to_response" to "credits,videos"))
+        val o = get("/${type.path}/$id", mapOf("language" to "en-US", "append_to_response" to "credits,videos"), TTL_DETAILS)
         val genres = o.optJSONArray("genres")?.let { arr ->
             (0 until arr.length()).map { arr.getJSONObject(it).optString("name") }.filter { it.isNotBlank() }
         } ?: emptyList()
@@ -235,7 +267,7 @@ class Tmdb(private val key: String) {
     /** Look up one title by id (for Trakt lists). Null when TMDB no longer has it. */
     suspend fun details(type: MediaType, id: Int): Title? = withContext(Dispatchers.IO) {
         try {
-            title(get("/${type.path}/$id", mapOf("language" to "en-US")), type)
+            title(get("/${type.path}/$id", mapOf("language" to "en-US"), TTL_DETAILS), type)
         } catch (e: IOException) {
             if (e.message?.startsWith("TMDB 404") == true) null else throw e
         }
@@ -278,20 +310,71 @@ class Tmdb(private val key: String) {
     private fun today(): String =
         java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
 
-    private val availabilityCache = ConcurrentHashMap<String, Availability>()
-    private val availabilityLimit = Semaphore(8)
+    // ---------- Availability index ----------
+    //
+    // One watch/providers response per title is a few KB for every region; checking a page
+    // means twenty of them. The parsed verdicts (two small id sets) are kept instead, all in
+    // one index file that loads in a single read and is rewritten after each page is checked.
 
-    /** Where this title is available in the region. Cached for the life of the client. */
+    private class Stamped(val a: Availability, val at: Long)
+
+    private val availabilityCache = ConcurrentHashMap<String, Stamped>()
+    private val availabilityLimit = Semaphore(8)
+    @Volatile private var indexLoaded = false
+    @Volatile private var indexDirty = false
+
+    private fun loadIndex() {
+        if (indexLoaded) return
+        synchronized(availabilityCache) {
+            if (indexLoaded) return
+            indexLoaded = true
+            val body = cache?.get(INDEX_KEY)?.body ?: return
+            val cutoff = System.currentTimeMillis() - TTL_AVAILABILITY
+            runCatching {
+                val o = JSONObject(body)
+                for (key in o.keys()) {
+                    val e = o.getJSONObject(key)
+                    val at = e.optLong("t", 0L)
+                    if (at < cutoff) continue
+                    availabilityCache[key] = Stamped(Availability(ints(e.optJSONArray("s")), ints(e.optJSONArray("r"))), at)
+                }
+            }
+        }
+    }
+
+    /** Write the index if anything was added since the last write. Cheap to call often. */
+    fun flushIndex() {
+        if (!indexDirty) return
+        indexDirty = false
+        val o = JSONObject()
+        for ((key, s) in availabilityCache) {
+            o.put(
+                key,
+                JSONObject()
+                    .put("s", JSONArray(s.a.stream.toList()))
+                    .put("r", JSONArray(s.a.rentBuy.toList()))
+                    .put("t", s.at),
+            )
+        }
+        cache?.put(INDEX_KEY, o.toString())
+    }
+
+    private fun ints(arr: JSONArray?): Set<Int> =
+        if (arr == null) emptySet() else (0 until arr.length()).map { arr.getInt(it) }.toSet()
+
+    /** Where this title is available in the region. Served from the index for [TTL_AVAILABILITY]. */
     suspend fun availability(type: MediaType, id: Int, region: String): Availability {
         val key = "${type.path}/$id/$region"
-        availabilityCache[key]?.let { return it }
+        if (!indexLoaded) withContext(Dispatchers.IO) { loadIndex() }
+        availabilityCache[key]?.let { return it.a }
         return withContext(Dispatchers.IO) {
             val r = get("/${type.path}/$id/watch/providers").optJSONObject("results")?.optJSONObject(region)
             val a = if (r == null) Availability.NONE else Availability(
                 stream = providerIds(r, "flatrate", "free", "ads"),
                 rentBuy = providerIds(r, "rent", "buy"),
             )
-            availabilityCache[key] = a
+            availabilityCache[key] = Stamped(a, System.currentTimeMillis())
+            indexDirty = true
             a
         }
     }
@@ -322,7 +405,7 @@ class Tmdb(private val key: String) {
                     t.takeIf { on.isNotEmpty() && extraCheck(t, on) }
                 }
             }
-        }.awaitAll().filterNotNull()
+        }.awaitAll().filterNotNull().also { withContext(Dispatchers.IO) { flushIndex() } }
     }
 
     private fun providerIds(r: JSONObject, vararg kinds: String): Set<Int> {
@@ -336,6 +419,12 @@ class Tmdb(private val key: String) {
 
     companion object {
         private const val BASE = "https://api.themoviedb.org/3"
+        /** Disk-cache lifetimes. Lists move daily; availability shifts a little slower; the rest barely changes. */
+        private const val TTL_LISTS = 6 * DiskCache.HOUR
+        private const val TTL_AVAILABILITY = 12 * DiskCache.HOUR
+        private const val TTL_DETAILS = 7 * DiskCache.DAY
+        private const val TTL_STATIC = 7 * DiskCache.DAY
+        private const val INDEX_KEY = "availability-index"
         const val IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
         const val BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
         fun normalize(s: String) = s.lowercase().filter { it.isLetterOrDigit() }

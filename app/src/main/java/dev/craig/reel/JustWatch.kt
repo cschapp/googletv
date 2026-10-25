@@ -32,7 +32,11 @@ data class Offer(
 object JustWatch {
 
     private const val ENDPOINT = "https://apis.justwatch.com/graphql"
+    private const val TTL = 12 * DiskCache.HOUR
     private val cache = ConcurrentHashMap<String, List<Offer>>()
+
+    /** Set once at startup; offers are then kept on disk for [TTL] too. */
+    @Volatile var disk: DiskCache? = null
 
     private const val QUERY = """
 query(${'$'}c: Country!, ${'$'}l: Language!, ${'$'}q: String!, ${'$'}t: [ObjectType!]) {
@@ -50,12 +54,22 @@ query(${'$'}c: Country!, ${'$'}l: Language!, ${'$'}q: String!, ${'$'}t: [ObjectT
         val key = "${title.type.path}/${title.id}/$region"
         cache[key]?.let { return it }
         return withContext(Dispatchers.IO) {
-            val variables = JSONObject()
-                .put("c", region)
-                .put("l", "en")
-                .put("q", title.name)
-                .put("t", JSONArray().put(if (title.type == MediaType.MOVIE) "MOVIE" else "SHOW"))
-            val json = post(JSONObject().put("query", QUERY).put("variables", variables))
+            val diskKey = "justwatch/$key"
+            val stale = disk?.get(diskKey)
+            val json = if (stale != null && stale.ageMs < TTL) {
+                JSONObject(stale.body)
+            } else {
+                val variables = JSONObject()
+                    .put("c", region)
+                    .put("l", "en")
+                    .put("q", title.name)
+                    .put("t", JSONArray().put(if (title.type == MediaType.MOVIE) "MOVIE" else "SHOW"))
+                try {
+                    post(JSONObject().put("query", QUERY).put("variables", variables)).also { disk?.put(diskKey, it.toString()) }
+                } catch (e: IOException) {
+                    if (stale != null) JSONObject(stale.body) else throw e
+                }
+            }
             val edges = json.optJSONObject("data")?.optJSONObject("popularTitles")?.optJSONArray("edges")
                 ?: JSONArray()
             var found: List<Offer> = emptyList()

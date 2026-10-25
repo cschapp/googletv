@@ -17,6 +17,10 @@ object YouTube {
 
     private val cache = ConcurrentHashMap<String, Boolean>()
 
+    /** Set once at startup; verdicts are then kept on disk for [TTL] so a relaunch doesn't re-ask YouTube. */
+    @Volatile var disk: DiskCache? = null
+    private const val TTL = DiskCache.DAY
+
     /** The v= id of a youtube.com/watch link, or null. */
     fun videoId(url: String?): String? {
         val u = runCatching { Uri.parse(url ?: return null) }.getOrNull() ?: return null
@@ -32,6 +36,12 @@ object YouTube {
     suspend fun isPublic(videoId: String): Boolean {
         cache[videoId]?.let { return it }
         return withContext(Dispatchers.IO) {
+            val diskKey = "youtube/public/$videoId"
+            disk?.get(diskKey)?.takeIf { it.ageMs < TTL }?.let { e ->
+                val v = e.body == "1"
+                cache[videoId] = v
+                return@withContext v
+            }
             val url = URL("https://www.youtube.com/oembed?format=json&url=" + Uri.encode("https://www.youtube.com/watch?v=$videoId"))
             val conn = url.openConnection() as HttpURLConnection
             conn.connectTimeout = 8_000
@@ -45,6 +55,7 @@ object YouTube {
                     else -> true
                 }
                 cache[videoId] = result
+                disk?.put(diskKey, if (result) "1" else "0")
                 result
             } catch (e: IOException) {
                 true
