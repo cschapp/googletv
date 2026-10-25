@@ -32,6 +32,12 @@
             android:layout_weight="1" />
 
         <TextView
+            android:id="@+id/btnSearch"
+            style="@style/Chip"
+            android:contentDescription="Search movies and shows"
+            android:text="🔍 Search" />
+
+        <TextView
             android:id="@+id/btnMediaType"
             style="@style/Chip"
             android:text="Movies" />

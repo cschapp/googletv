@@ -41,8 +41,6 @@ class MainActivity : ComponentActivity() {
         object Continue : GenreChoice()
         object Recent : GenreChoice()
         object More : GenreChoice()
-        /** The chip that opens the search box. Never selected itself. */
-        object SearchPrompt : GenreChoice()
 
         /** Discover-based rows honour the sort button; the others come pre-ordered. */
         val sortable get() = this is Std || this is Kw || this === All
@@ -108,7 +106,6 @@ class MainActivity : ComponentActivity() {
                 GenreChoice.Continue -> "▶ Continue watching"
                 GenreChoice.Recent -> "Recent"
                 GenreChoice.More -> "＋ More genres…"
-                GenreChoice.SearchPrompt -> "🔍"
             }
         },
         isSelected = { it == currentGenre },
@@ -166,6 +163,7 @@ class MainActivity : ComponentActivity() {
         }
         updateSortButton()
         btnSort.setOnClickListener { showSortPicker() }
+        findViewById<View>(R.id.btnSearch).setOnClickListener { showSearch() }
         findViewById<View>(R.id.btnSettings).setOnClickListener { showSettings() }
 
         // Give the poster grid the whole screen while you're browsing it.
@@ -422,9 +420,9 @@ class MainActivity : ComponentActivity() {
             GenreChoice.Recent.takeIf { prefs.recentTitles.isNotEmpty() },
         )
         val traktRows = if (linked) listOf(GenreChoice.Watchlist, GenreChoice.ForYou) else emptyList()
-        // The latest search keeps a chip for the session, so you can come back to it.
+        // The latest search (started from the header button) keeps a chip for the session, so you can come back to it.
         val search = listOfNotNull(lastSearch)
-        genreChoices = listOf(GenreChoice.SearchPrompt) + search + listOf(GenreChoice.More) + mine +
+        genreChoices = search + listOf(GenreChoice.More) + mine +
             listOf(GenreChoice.Trending, GenreChoice.All) +
             traktRows +
             prefs.recentGenres.map { GenreChoice.Kw(it) } +
@@ -435,7 +433,6 @@ class MainActivity : ComponentActivity() {
     private fun onGenreClicked(c: GenreChoice) {
         when (c) {
             GenreChoice.More -> pickGenre.launch(Intent(this, GenrePickerActivity::class.java))
-            GenreChoice.SearchPrompt -> showSearch()
             else -> selectGenre(c)
         }
     }
