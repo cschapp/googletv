@@ -153,6 +153,25 @@ class Tmdb(private val key: String) {
         page(get("/trending/${type.path}/week", mapOf("language" to "en-US", "page" to page.toString())), type, page)
     }
 
+    /** Free-text search across movies and shows at once; people and junk rows are dropped. */
+    suspend fun search(query: String, page: Int): ResultPage = withContext(Dispatchers.IO) {
+        val json = get(
+            "/search/multi",
+            mapOf("query" to query, "include_adult" to "false", "language" to "en-US", "page" to page.toString()),
+        )
+        val arr = json.optJSONArray("results")
+        val items = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
+            val o = arr!!.getJSONObject(i)
+            val type = when (o.optString("media_type")) {
+                "movie" -> MediaType.MOVIE
+                "tv" -> MediaType.TV
+                else -> return@mapNotNull null
+            }
+            title(o, type)
+        }
+        ResultPage(json.optInt("page", page), minOf(json.optInt("total_pages", 1), 500), items)
+    }
+
     /** Look up one title by id (for Trakt lists). Null when TMDB no longer has it. */
     suspend fun details(type: MediaType, id: Int): Title? = withContext(Dispatchers.IO) {
         try {

@@ -7,6 +7,8 @@ import android.provider.Settings
 import android.text.format.DateUtils
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -30,6 +32,8 @@ class MainActivity : ComponentActivity() {
     private sealed class GenreChoice {
         data class Std(val genre: Genre) : GenreChoice()
         data class Kw(val query: String) : GenreChoice()
+        /** Free-text results for [query]; movies and shows together, whatever the type toggle says. */
+        data class Search(val query: String) : GenreChoice()
         object All : GenreChoice()
         object Trending : GenreChoice()
         object Watchlist : GenreChoice()
@@ -37,12 +41,17 @@ class MainActivity : ComponentActivity() {
         object Continue : GenreChoice()
         object Recent : GenreChoice()
         object More : GenreChoice()
+        /** The chip that opens the search box. Never selected itself. */
+        object SearchPrompt : GenreChoice()
 
         /** Discover-based rows honour the sort button; the others come pre-ordered. */
         val sortable get() = this is Std || this is Kw || this === All
 
-        /** Rows built from what you've watched: shown as-is, without the "is it on my apps" filter. */
-        val personal get() = this === Continue || this === Recent
+        /**
+         * Rows you asked for by name: shown as-is, without the "is it on my apps" filter,
+         * and with movies and shows together whatever the type toggle says.
+         */
+        val personal get() = this === Continue || this === Recent || this is Search
 
         /** Rows that come from Trakt and need a linked account. */
         val trakt get() = this === Watchlist || this === ForYou || this === Continue
@@ -91,6 +100,7 @@ class MainActivity : ComponentActivity() {
             when (it) {
                 is GenreChoice.Std -> it.genre.name
                 is GenreChoice.Kw -> "✦ ${it.query}"
+                is GenreChoice.Search -> "🔍 ${it.query}"
                 GenreChoice.All -> "All"
                 GenreChoice.Trending -> "🔥 Trending"
                 GenreChoice.Watchlist -> "Watchlist"
@@ -98,6 +108,7 @@ class MainActivity : ComponentActivity() {
                 GenreChoice.Continue -> "▶ Continue watching"
                 GenreChoice.Recent -> "Recent"
                 GenreChoice.More -> "＋ More genres…"
+                GenreChoice.SearchPrompt -> "🔍"
             }
         },
         isSelected = { it == currentGenre },
@@ -223,6 +234,11 @@ class MainActivity : ComponentActivity() {
             pendingRow = name.lowercase()
             if (!changed && standardGenres.isNotEmpty()) applyPendingRow()
         }
+        // --es search "the bear" : run a search as if typed.
+        i?.getStringExtra("search")?.takeIf { it.isNotBlank() }?.let { q ->
+            pendingRow = "search:$q"
+            if (!changed && standardGenres.isNotEmpty()) applyPendingRow()
+        }
         return changed
     }
 
@@ -231,6 +247,10 @@ class MainActivity : ComponentActivity() {
     private fun applyPendingRow() {
         val name = pendingRow ?: return
         pendingRow = null
+        if (name.startsWith("search:")) {
+            search(name.removePrefix("search:"))
+            return
+        }
         val choice = when (name) {
             "continue" -> GenreChoice.Continue
             "recent" -> GenreChoice.Recent
@@ -402,7 +422,10 @@ class MainActivity : ComponentActivity() {
             GenreChoice.Recent.takeIf { prefs.recentTitles.isNotEmpty() },
         )
         val traktRows = if (linked) listOf(GenreChoice.Watchlist, GenreChoice.ForYou) else emptyList()
-        genreChoices = listOf(GenreChoice.More) + mine + listOf(GenreChoice.Trending, GenreChoice.All) +
+        // The latest search keeps a chip for the session, so you can come back to it.
+        val search = listOfNotNull(lastSearch)
+        genreChoices = listOf(GenreChoice.SearchPrompt) + search + listOf(GenreChoice.More) + mine +
+            listOf(GenreChoice.Trending, GenreChoice.All) +
             traktRows +
             prefs.recentGenres.map { GenreChoice.Kw(it) } +
             standardGenres.map { GenreChoice.Std(it) }
@@ -410,11 +433,43 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onGenreClicked(c: GenreChoice) {
-        if (c == GenreChoice.More) {
-            pickGenre.launch(Intent(this, GenrePickerActivity::class.java))
-        } else {
-            selectGenre(c)
+        when (c) {
+            GenreChoice.More -> pickGenre.launch(Intent(this, GenrePickerActivity::class.java))
+            GenreChoice.SearchPrompt -> showSearch()
+            else -> selectGenre(c)
         }
+    }
+
+    // ---------- Search ----------
+
+    private var lastSearch: GenreChoice.Search? = null
+
+    private fun showSearch() {
+        if (tmdb == null) {
+            toast(getString(R.string.no_key))
+            return
+        }
+        val last = (currentGenre as? GenreChoice.Search)?.query ?: ""
+        promptText("Search movies and shows", last, hint = "Title, e.g. Severance", onSave = ::search)
+    }
+
+    private fun search(raw: String) {
+        val q = raw.trim()
+        if (q.isEmpty()) return
+        val choice = GenreChoice.Search(q)
+        lastSearch = choice
+        rebuildGenreChoices()
+        selectGenre(choice)
+        genreRow.post { focusSelectedGenre() }
+    }
+
+    /** The remote's search key (where the system lets a launcher see it) opens the search box. */
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_SEARCH) {
+            showSearch()
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
     }
 
     private fun selectGenre(c: GenreChoice) {
@@ -522,11 +577,10 @@ class MainActivity : ComponentActivity() {
     /** One page of raw candidates for a row, before availability checks. */
     private suspend fun fetchPage(client: Tmdb, choice: GenreChoice, pageNo: Int): ResultPage = when (choice) {
         GenreChoice.Trending -> client.trending(prefs.mediaType, pageNo)
+        is GenreChoice.Search -> client.search(choice.query, pageNo)
         GenreChoice.Recent -> {
-            val now = System.currentTimeMillis()
-            val titles = prefs.recentTitles.filter { it.title.type == prefs.mediaType }.map { r ->
-                val ago = DateUtils.getRelativeTimeSpanString(r.at, now, DateUtils.MINUTE_IN_MILLIS)
-                r.title.copy(note = listOf(r.app.ifBlank { null }, ago).filterNotNull().joinToString(" · "))
+            val titles = prefs.recentTitles.map { r ->
+                r.title.copy(note = listOfNotNull(r.app.ifBlank { null }, ago(r.at)).joinToString(" · "))
             }
             ResultPage(1, 1, titles)
         }
@@ -536,10 +590,10 @@ class MainActivity : ComponentActivity() {
             val items = when (choice) {
                 GenreChoice.Watchlist -> t.watchlist(prefs.mediaType)
                 GenreChoice.ForYou -> t.recommendations(prefs.mediaType)
-                else -> t.continueWatching(prefs.mediaType)
+                else -> t.continueWatching()
             }.take(MAX_LIST_ITEMS)
-            val notes = items.associate { it.tmdbId to it.note }
-            val titles = client.detailsMany(items.map { it.type to it.tmdbId }).map { it.copy(note = notes[it.id]) }
+            val notes = items.associate { (it.type to it.tmdbId) to it.note }
+            val titles = client.detailsMany(items.map { it.type to it.tmdbId }).map { it.copy(note = notes[it.type to it.id]) }
             ResultPage(1, 1, titles)
         }
         else -> client.discover(
@@ -555,12 +609,25 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /** Short enough to share a poster's note line with an app name: "5m ago", "3h ago", "Oct 3". */
+    private fun ago(at: Long): String {
+        val mins = (System.currentTimeMillis() - at) / 60_000
+        return when {
+            mins < 1 -> "just now"
+            mins < 60 -> "${mins}m ago"
+            mins < 24 * 60 -> "${mins / 60}h ago"
+            mins < 7 * 24 * 60 -> "${mins / (24 * 60)}d ago"
+            else -> DateUtils.formatDateTime(this, at, DateUtils.FORMAT_ABBREV_MONTH or DateUtils.FORMAT_NO_YEAR)
+        }
+    }
+
     private fun emptyMessage(choice: GenreChoice) = when (choice) {
         GenreChoice.Watchlist -> "Nothing on your Trakt watchlist streams on your apps right now."
         GenreChoice.ForYou -> "None of Trakt's picks for you stream on your apps right now."
         GenreChoice.Trending -> "Nothing trending streams on your apps right now."
-        GenreChoice.Continue -> "Trakt has nothing in progress for ${prefs.mediaType.label.lowercase()}."
-        GenreChoice.Recent -> "No ${prefs.mediaType.label.lowercase()} opened from Reel yet."
+        GenreChoice.Continue -> "Trakt has nothing in progress."
+        GenreChoice.Recent -> "Nothing opened from Reel yet."
+        is GenreChoice.Search -> "TMDB found nothing for “${choice.query}”."
         else -> "Nothing in your apps for this genre right now."
     }
 
@@ -906,18 +973,36 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    private fun promptText(title: String, initial: String, onSave: (String) -> Unit) {
+    private fun promptText(title: String, initial: String, hint: String? = null, onSave: (String) -> Unit) {
         val input = EditText(this).apply {
             setText(initial)
             setSingleLine()
             setSelection(text.length)
+            this.hint = hint
+            imeOptions = if (hint != null) EditorInfo.IME_ACTION_SEARCH else EditorInfo.IME_ACTION_DONE
         }
-        AlertDialog.Builder(this)
+        var saved = false
+        val save = {
+            if (!saved) {
+                saved = true
+                onSave(input.text.toString())
+            }
+        }
+        val dialog = AlertDialog.Builder(this)
             .setTitle(title)
             .setView(input)
-            .setPositiveButton("Save") { _, _ -> onSave(input.text.toString()) }
+            .setPositiveButton(if (hint != null) "Search" else "Save") { _, _ -> save() }
             .setNegativeButton("Cancel", null)
-            .show()
+            .create()
+        // The on-screen keyboard's action key counts as the positive button.
+        input.setOnEditorActionListener { _, _, _ ->
+            dialog.dismiss()
+            save()
+            true
+        }
+        dialog.show()
+        input.requestFocus()
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
     }
 
     // ---------- Helpers ----------

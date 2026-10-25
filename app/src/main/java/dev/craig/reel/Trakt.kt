@@ -133,33 +133,34 @@ class Trakt(private val clientId: String, private val clientSecret: String, priv
      *  - anything paused mid-play in a scrobbling app (Trakt's playback progress), and
      *  - for shows, anything you've watched an episode of recently that still has unwatched episodes.
      */
-    suspend fun continueWatching(type: MediaType): List<TraktItem> = withContext(Dispatchers.IO) {
-        val out = LinkedHashMap<Int, TraktItem>()
-        for (item in playback(type)) out.putIfAbsent(item.tmdbId, item)
-        if (type == MediaType.TV) {
-            for (item in showsInProgress()) out.putIfAbsent(item.tmdbId, item)
-        }
+    suspend fun continueWatching(): List<TraktItem> = withContext(Dispatchers.IO) {
+        val out = LinkedHashMap<Pair<MediaType, Int>, TraktItem>()
+        for (item in playback()) out.putIfAbsent(item.type to item.tmdbId, item)
+        for (item in showsInProgress()) out.putIfAbsent(item.type to item.tmdbId, item)
         out.values.toList()
     }
 
-    /** Paused playback positions, most recently paused first. */
-    private fun playback(type: MediaType): List<TraktItem> {
-        val kind = if (type == MediaType.MOVIE) "movies" else "episodes"
-        val arr = callArray("GET", "/sync/playback/$kind?limit=$PLAYBACK_LIMIT")
+    /** Paused playback positions, movies and episodes together, most recently paused first. */
+    private fun playback(): List<TraktItem> {
+        val arr = callArray("GET", "/sync/playback?limit=$PLAYBACK_LIMIT")
         return (0 until arr.length()).mapNotNull { i ->
             val o = arr.getJSONObject(i)
             val progress = o.optDouble("progress", 0.0)
             // Trakt keeps a position until it's cleared; near-complete ones are effectively watched.
             if (progress >= DONE_PERCENT) return@mapNotNull null
             val pct = progress.toInt()
-            if (type == MediaType.MOVIE) {
-                val tmdb = o.optJSONObject("movie")?.tmdbId() ?: return@mapNotNull null
-                TraktItem(type, tmdb, "$pct% watched")
-            } else {
-                val tmdb = o.optJSONObject("show")?.tmdbId() ?: return@mapNotNull null
-                val ep = o.optJSONObject("episode")
-                val where = ep?.let { "S${it.optInt("season")} E${it.optInt("number")}" }
-                TraktItem(type, tmdb, listOfNotNull(where, "$pct%").joinToString(" · "))
+            when (o.optString("type")) {
+                "movie" -> {
+                    val tmdb = o.optJSONObject("movie")?.tmdbId() ?: return@mapNotNull null
+                    TraktItem(MediaType.MOVIE, tmdb, "$pct% watched")
+                }
+                "episode" -> {
+                    val tmdb = o.optJSONObject("show")?.tmdbId() ?: return@mapNotNull null
+                    val ep = o.optJSONObject("episode")
+                    val where = ep?.let { "S${it.optInt("season")} E${it.optInt("number")}" }
+                    TraktItem(MediaType.TV, tmdb, listOfNotNull(where, "$pct%").joinToString(" · "))
+                }
+                else -> null
             }
         }
     }
