@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reel</string>
+    <string name="no_key">Add a free TMDB API key to see genres.\n\nPress ⚙ → TMDB API key, or from your PC:\nadb shell am start -n dev.craig.reel/.MainActivity --es tmdb_key YOUR_KEY</string>
+</resources>

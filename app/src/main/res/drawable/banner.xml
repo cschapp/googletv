@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 16:9 TV banner: dark card with the reel mark and a film strip -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path
+        android:fillColor="#0E0F13"
+        android:pathData="M0,0h320v180h-320z" />
+    <!-- film strip -->
+    <path
+        android:fillColor="#22252E"
+        android:pathData="M120,64h176v52h-176z" />
+    <path
+        android:fillColor="#0E0F13"
+        android:pathData="M128,70h12v8h-12z M152,70h12v8h-12z M176,70h12v8h-12z M200,70h12v8h-12z M224,70h12v8h-12z M248,70h12v8h-12z M272,70h12v8h-12z
+            M128,102h12v8h-12z M152,102h12v8h-12z M176,102h12v8h-12z M200,102h12v8h-12z M224,102h12v8h-12z M248,102h12v8h-12z M272,102h12v8h-12z" />
+    <!-- reel -->
+    <path
+        android:fillColor="#3D5AFE"
+        android:pathData="M72,42a48,48 0,1 1,0 96a48,48 0,1 1,0 -96z" />
+    <path
+        android:fillColor="#0E0F13"
+        android:pathData="M72,53a11,11 0,1 1,0 22a11,11 0,1 1,0 -22z
+            M103.4,75.7a11,11 0,1 1,0 22a11,11 0,1 1,0 -22z
+            M91.4,112.6a11,11 0,1 1,0 22a11,11 0,1 1,0 -22z
+            M52.6,112.6a11,11 0,1 1,0 22a11,11 0,1 1,0 -22z
+            M40.6,75.7a11,11 0,1 1,0 22a11,11 0,1 1,0 -22z
+            M72,83a7,7 0,1 1,0 14a7,7 0,1 1,0 -14z" />
+</vector>

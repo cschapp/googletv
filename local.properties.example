@@ -1,0 +1,13 @@
+# Copy to local.properties and fill in.
+# Path to your Android SDK (the folder that contains platforms/ and build-tools/)
+sdk.dir=/home/cschappa/Android/Sdk
+
+# Optional: bake your TMDB key into the build (v3 API key or v4 read access token).
+# You can also set it on the TV later from Reel's settings or via adb.
+tmdb.key=
+
+# Optional: Trakt app client ID (trakt.tv/oauth/applications; redirect URI https://trakt.tv).
+# Needed for the Watchlist / For you rows. Can also be pushed via adb (see README).
+# New Trakt apps are PKCE-only and have no secret; leave trakt.client_secret blank unless yours has one.
+trakt.client_id=
+trakt.client_secret=
