@@ -4,6 +4,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
+import android.text.format.DateUtils
 import android.view.KeyEvent
 import android.view.View
 import android.widget.EditText
@@ -33,10 +34,18 @@ class MainActivity : ComponentActivity() {
         object Trending : GenreChoice()
         object Watchlist : GenreChoice()
         object ForYou : GenreChoice()
+        object Continue : GenreChoice()
+        object Recent : GenreChoice()
         object More : GenreChoice()
 
         /** Discover-based rows honour the sort button; the others come pre-ordered. */
         val sortable get() = this is Std || this is Kw || this === All
+
+        /** Rows built from what you've watched: shown as-is, without the "is it on my apps" filter. */
+        val personal get() = this === Continue || this === Recent
+
+        /** Rows that come from Trakt and need a linked account. */
+        val trakt get() = this === Watchlist || this === ForYou || this === Continue
     }
 
     private lateinit var prefs: Prefs
@@ -86,6 +95,8 @@ class MainActivity : ComponentActivity() {
                 GenreChoice.Trending -> "🔥 Trending"
                 GenreChoice.Watchlist -> "Watchlist"
                 GenreChoice.ForYou -> "For you"
+                GenreChoice.Continue -> "▶ Continue watching"
+                GenreChoice.Recent -> "Recent"
                 GenreChoice.More -> "＋ More genres…"
             }
         },
@@ -93,7 +104,10 @@ class MainActivity : ComponentActivity() {
         onClick = { onGenreClicked(it) },
     )
 
-    private val posterAdapter = PosterAdapter { onTitleClicked(it) }
+    private val posterAdapter = PosterAdapter(
+        onClick = { onTitleClicked(it) },
+        onLongClick = { onTitleLongClicked(it) },
+    )
 
     private val pickGenre = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val q = r.data?.getStringExtra(GenrePickerActivity.EXTRA_QUERY)?.trim()
@@ -204,7 +218,29 @@ class MainActivity : ComponentActivity() {
             prefs.weatherQuery = it
             if (::weather.isInitialized) startWeather()
         }
+        // --es row continue|recent|trending|all|watchlist|foryou : jump to a row (handy from adb).
+        i?.getStringExtra("row")?.let { name ->
+            pendingRow = name.lowercase()
+            if (!changed && standardGenres.isNotEmpty()) applyPendingRow()
+        }
         return changed
+    }
+
+    private var pendingRow: String? = null
+
+    private fun applyPendingRow() {
+        val name = pendingRow ?: return
+        pendingRow = null
+        val choice = when (name) {
+            "continue" -> GenreChoice.Continue
+            "recent" -> GenreChoice.Recent
+            "trending" -> GenreChoice.Trending
+            "all" -> GenreChoice.All
+            "watchlist" -> GenreChoice.Watchlist
+            "foryou" -> GenreChoice.ForYou
+            else -> null
+        }
+        if (choice != null && choice in genreChoices) selectGenre(choice) else toast("No row “$name”")
     }
 
     // ---------- Apps ----------
@@ -356,11 +392,17 @@ class MainActivity : ComponentActivity() {
             else -> keep.takeIf { it in genreChoices }
         } ?: GenreChoice.All
         selectGenre(next)
+        applyPendingRow()
     }
 
     private fun rebuildGenreChoices() {
-        val traktRows = if (trakt()?.isLinked == true) listOf(GenreChoice.Watchlist, GenreChoice.ForYou) else emptyList()
-        genreChoices = listOf(GenreChoice.More, GenreChoice.Trending, GenreChoice.All) +
+        val linked = trakt()?.isLinked == true
+        val mine = listOfNotNull(
+            GenreChoice.Continue.takeIf { linked },
+            GenreChoice.Recent.takeIf { prefs.recentTitles.isNotEmpty() },
+        )
+        val traktRows = if (linked) listOf(GenreChoice.Watchlist, GenreChoice.ForYou) else emptyList()
+        genreChoices = listOf(GenreChoice.More) + mine + listOf(GenreChoice.Trending, GenreChoice.All) +
             traktRows +
             prefs.recentGenres.map { GenreChoice.Kw(it) } +
             standardGenres.map { GenreChoice.Std(it) }
@@ -443,10 +485,14 @@ class MainActivity : ComponentActivity() {
                 if (gen != generation) return
                 page = res.page
                 totalPages = res.totalPages
-                if (page == 1 && posterAdapter.itemCount == 0) showStatus("Checking your apps…", busy = true)
-                found += client.onlyStreamingOn(res.items, ids, prefs.region) { t, on ->
-                    // Anything besides YouTube is trusted; a YouTube-only title must have a live video.
-                    on.any { it !in youtubeIds() } || playableOnYouTube(t, null)
+                if (page == 1 && posterAdapter.itemCount == 0 && !choice.personal) showStatus("Checking your apps…", busy = true)
+                found += if (choice.personal) {
+                    res.items
+                } else {
+                    client.onlyStreamingOn(res.items, ids, prefs.region) { t, on ->
+                        // Anything besides YouTube is trusted; a YouTube-only title must have a live video.
+                        on.any { it !in youtubeIds() } || playableOnYouTube(t, null)
+                    }
                 }
                 if (gen != generation) return
                 pulled++
@@ -476,11 +522,24 @@ class MainActivity : ComponentActivity() {
     /** One page of raw candidates for a row, before availability checks. */
     private suspend fun fetchPage(client: Tmdb, choice: GenreChoice, pageNo: Int): ResultPage = when (choice) {
         GenreChoice.Trending -> client.trending(prefs.mediaType, pageNo)
-        GenreChoice.Watchlist, GenreChoice.ForYou -> {
+        GenreChoice.Recent -> {
+            val now = System.currentTimeMillis()
+            val titles = prefs.recentTitles.filter { it.title.type == prefs.mediaType }.map { r ->
+                val ago = DateUtils.getRelativeTimeSpanString(r.at, now, DateUtils.MINUTE_IN_MILLIS)
+                r.title.copy(note = listOf(r.app.ifBlank { null }, ago).filterNotNull().joinToString(" · "))
+            }
+            ResultPage(1, 1, titles)
+        }
+        GenreChoice.Watchlist, GenreChoice.ForYou, GenreChoice.Continue -> {
             // Trakt lists come whole; look the titles up on TMDB and show them as a single page.
             val t = trakt() ?: throw IllegalStateException("Trakt isn't linked")
-            val items = if (choice == GenreChoice.Watchlist) t.watchlist(prefs.mediaType) else t.recommendations(prefs.mediaType)
-            val titles = client.detailsMany(items.take(MAX_LIST_ITEMS).map { it.type to it.tmdbId })
+            val items = when (choice) {
+                GenreChoice.Watchlist -> t.watchlist(prefs.mediaType)
+                GenreChoice.ForYou -> t.recommendations(prefs.mediaType)
+                else -> t.continueWatching(prefs.mediaType)
+            }.take(MAX_LIST_ITEMS)
+            val notes = items.associate { it.tmdbId to it.note }
+            val titles = client.detailsMany(items.map { it.type to it.tmdbId }).map { it.copy(note = notes[it.id]) }
             ResultPage(1, 1, titles)
         }
         else -> client.discover(
@@ -500,6 +559,8 @@ class MainActivity : ComponentActivity() {
         GenreChoice.Watchlist -> "Nothing on your Trakt watchlist streams on your apps right now."
         GenreChoice.ForYou -> "None of Trakt's picks for you stream on your apps right now."
         GenreChoice.Trending -> "Nothing trending streams on your apps right now."
+        GenreChoice.Continue -> "Trakt has nothing in progress for ${prefs.mediaType.label.lowercase()}."
+        GenreChoice.Recent -> "No ${prefs.mediaType.label.lowercase()} opened from Reel yet."
         else -> "Nothing in your apps for this genre right now."
     }
 
@@ -632,7 +693,40 @@ class MainActivity : ComponentActivity() {
             .sorted()
 
     private fun openOn(svc: InstalledService, t: Title, offers: List<Offer>) {
-        if (!Launch.openTitle(this, svc, t.name, offers)) toast("Couldn't open ${svc.label}")
+        if (!Launch.openTitle(this, svc, t.name, offers)) {
+            toast("Couldn't open ${svc.label}")
+            return
+        }
+        val firstEver = prefs.recentTitles.isEmpty()
+        prefs.addRecentTitle(t, svc.label)
+        if (firstEver) rebuildGenreChoices()
+    }
+
+    /** Long press on a poster: in the Recent row, offer to forget it. */
+    private fun onTitleLongClicked(t: Title): Boolean {
+        if (currentGenre != GenreChoice.Recent) return false
+        AlertDialog.Builder(this)
+            .setTitle(t.name)
+            .setItems(arrayOf("Remove from Recent", "Clear all Recent")) { _, which ->
+                when (which) {
+                    0 -> {
+                        prefs.removeRecentTitle(t)
+                        posterAdapter.remove(t)
+                        if (posterAdapter.itemCount == 0) showStatus(emptyMessage(GenreChoice.Recent))
+                        if (prefs.recentTitles.isEmpty()) {
+                            rebuildGenreChoices()
+                            selectGenre(GenreChoice.All)
+                        }
+                    }
+                    1 -> {
+                        prefs.recentTitles = emptyList()
+                        rebuildGenreChoices()
+                        selectGenre(GenreChoice.All)
+                    }
+                }
+            }
+            .show()
+        return true
     }
 
     // ---------- Weather ----------
@@ -761,7 +855,7 @@ class MainActivity : ComponentActivity() {
                             t.unlink()
                             toast("Trakt unlinked")
                             rebuildGenreChoices()
-                            if (currentGenre == GenreChoice.Watchlist || currentGenre == GenreChoice.ForYou) selectGenre(GenreChoice.All)
+                            if (currentGenre?.trakt == true) selectGenre(GenreChoice.All)
                         }
                         else -> linkTrakt()
                     }

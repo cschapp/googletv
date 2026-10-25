@@ -1,6 +1,8 @@
 package dev.craig.reel
 
 import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
 
 class Prefs(ctx: Context) {
     private val sp = ctx.getSharedPreferences("reel", Context.MODE_PRIVATE)
@@ -41,6 +43,54 @@ class Prefs(ctx: Context) {
 
     fun addRecentGenre(q: String) {
         recentGenres = listOf(q) + recentGenres.filterNot { it.equals(q, ignoreCase = true) }
+    }
+
+    // ---------- Recently launched ----------
+
+    /** Titles opened from Reel, newest first. Stored as JSON so a title survives without TMDB. */
+    var recentTitles: List<RecentTitle>
+        get() {
+            val arr = runCatching { JSONArray(sp.getString("recent_titles", null) ?: "[]") }.getOrDefault(JSONArray())
+            return (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val type = MediaType.entries.firstOrNull { it.path == o.optString("type") } ?: return@mapNotNull null
+                RecentTitle(
+                    title = Title(
+                        id = o.optInt("id"),
+                        type = type,
+                        name = o.optString("name"),
+                        year = o.optString("year"),
+                        posterPath = o.optString("poster").takeIf { it.isNotBlank() },
+                    ),
+                    app = o.optString("app"),
+                    at = o.optLong("at"),
+                )
+            }
+        }
+        set(v) {
+            val arr = JSONArray()
+            for (r in v.take(MAX_RECENT_TITLES)) {
+                arr.put(
+                    JSONObject()
+                        .put("type", r.title.type.path)
+                        .put("id", r.title.id)
+                        .put("name", r.title.name)
+                        .put("year", r.title.year)
+                        .put("poster", r.title.posterPath ?: "")
+                        .put("app", r.app)
+                        .put("at", r.at),
+                )
+            }
+            sp.edit().putString("recent_titles", arr.toString()).apply()
+        }
+
+    fun addRecentTitle(t: Title, app: String) {
+        recentTitles = listOf(RecentTitle(t.copy(note = null), app, System.currentTimeMillis())) +
+            recentTitles.filterNot { it.title.type == t.type && it.title.id == t.id }
+    }
+
+    fun removeRecentTitle(t: Title) {
+        recentTitles = recentTitles.filterNot { it.title.type == t.type && it.title.id == t.id }
     }
 
     // ---------- Weather ----------
@@ -95,8 +145,12 @@ class Prefs(ctx: Context) {
 
     companion object {
         private const val MAX_RECENT = 8
+        private const val MAX_RECENT_TITLES = 40
     }
 }
+
+/** A title you opened from Reel, and which app it went to. */
+data class RecentTitle(val title: Title, val app: String, val at: Long)
 
 /** How discover-based rows are ordered. */
 enum class Sort(val label: String) {

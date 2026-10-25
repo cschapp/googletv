@@ -29,6 +29,8 @@ data class Title(
     val name: String,
     val year: String,
     val posterPath: String?,
+    /** A short line under the name on personal rows, e.g. "Next: S2 E5" or "Opened in Netflix". */
+    val note: String? = null,
 )
 
 data class ResultPage(val page: Int, val totalPages: Int, val items: List<Title>)

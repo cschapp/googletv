@@ -1,7 +1,12 @@
 package dev.craig.reel
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -21,8 +26,8 @@ data class DeviceCode(
     val verifier: String,
 )
 
-/** A title from a Trakt list, as TMDB knows it. */
-data class TraktItem(val type: MediaType, val tmdbId: Int)
+/** A title from a Trakt list, as TMDB knows it. [note] is a short line for the card, e.g. "Next: S2 E5". */
+data class TraktItem(val type: MediaType, val tmdbId: Int, val note: String? = null)
 
 /**
  * Minimal Trakt client: device-code login, watchlist and recommendations.
@@ -121,6 +126,73 @@ class Trakt(private val clientId: String, private val clientSecret: String, priv
         items(callArray("GET", "/recommendations/$kind?limit=60&ignore_collected=true&ignore_watchlisted=true"), type)
     }
 
+    // ---------- Continue watching ----------
+
+    /**
+     * What you're part-way through, newest first:
+     *  - anything paused mid-play in a scrobbling app (Trakt's playback progress), and
+     *  - for shows, anything you've watched an episode of recently that still has unwatched episodes.
+     */
+    suspend fun continueWatching(type: MediaType): List<TraktItem> = withContext(Dispatchers.IO) {
+        val out = LinkedHashMap<Int, TraktItem>()
+        for (item in playback(type)) out.putIfAbsent(item.tmdbId, item)
+        if (type == MediaType.TV) {
+            for (item in showsInProgress()) out.putIfAbsent(item.tmdbId, item)
+        }
+        out.values.toList()
+    }
+
+    /** Paused playback positions, most recently paused first. */
+    private fun playback(type: MediaType): List<TraktItem> {
+        val kind = if (type == MediaType.MOVIE) "movies" else "episodes"
+        val arr = callArray("GET", "/sync/playback/$kind?limit=$PLAYBACK_LIMIT")
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.getJSONObject(i)
+            val progress = o.optDouble("progress", 0.0)
+            // Trakt keeps a position until it's cleared; near-complete ones are effectively watched.
+            if (progress >= DONE_PERCENT) return@mapNotNull null
+            val pct = progress.toInt()
+            if (type == MediaType.MOVIE) {
+                val tmdb = o.optJSONObject("movie")?.tmdbId() ?: return@mapNotNull null
+                TraktItem(type, tmdb, "$pct% watched")
+            } else {
+                val tmdb = o.optJSONObject("show")?.tmdbId() ?: return@mapNotNull null
+                val ep = o.optJSONObject("episode")
+                val where = ep?.let { "S${it.optInt("season")} E${it.optInt("number")}" }
+                TraktItem(type, tmdb, listOfNotNull(where, "$pct%").joinToString(" · "))
+            }
+        }
+    }
+
+    /** Recently watched shows that still have an unwatched aired episode, with where to pick up. */
+    private suspend fun showsInProgress(): List<TraktItem> = coroutineScope {
+        val arr = callArray("GET", "/sync/watched/shows?extended=noseasons")
+        val recent = (0 until arr.length())
+            .map { arr.getJSONObject(it) }
+            .sortedByDescending { it.optString("last_watched_at") }
+            .take(PROGRESS_SHOWS)
+        val limit = Semaphore(4)
+        recent.map { o ->
+            async {
+                limit.withPermit {
+                    val show = o.optJSONObject("show") ?: return@withPermit null
+                    val tmdb = show.tmdbId() ?: return@withPermit null
+                    val traktId = show.optJSONObject("ids")?.optInt("trakt", 0) ?: 0
+                    if (traktId == 0) return@withPermit null
+                    val p = try {
+                        call("GET", "/shows/$traktId/progress/watched?hidden=false&specials=false&count_specials=false").body
+                    } catch (e: IOException) {
+                        return@withPermit null
+                    }
+                    val next = p.optJSONObject("next_episode") ?: return@withPermit null
+                    TraktItem(MediaType.TV, tmdb, "Next: S${next.optInt("season")} E${next.optInt("number")}")
+                }
+            }
+        }.awaitAll().filterNotNull()
+    }
+
+    private fun JSONObject.tmdbId(): Int? = optJSONObject("ids")?.optInt("tmdb", 0)?.takeIf { it > 0 }
+
     private fun items(arr: JSONArray, type: MediaType): List<TraktItem> {
         val key = if (type == MediaType.MOVIE) "movie" else "show"
         return (0 until arr.length()).mapNotNull { i ->
@@ -209,6 +281,10 @@ class Trakt(private val clientId: String, private val clientSecret: String, priv
 
     companion object {
         private const val BASE = "https://api.trakt.tv"
+        private const val PLAYBACK_LIMIT = 40
+        /** How many recently watched shows to ask Trakt for a next episode; one call each. */
+        private const val PROGRESS_SHOWS = 20
+        private const val DONE_PERCENT = 95.0
         /** Register the Trakt app with exactly this redirect URI. Device-code login never redirects; token refresh just has to quote it. */
         const val REDIRECT_URI = "https://trakt.tv"
     }

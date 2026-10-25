@@ -122,9 +122,13 @@ class ChipAdapter<T>(
 class PosterVH(v: View) : RecyclerView.ViewHolder(v) {
     val image: ImageView = v.findViewById(R.id.posterImage)
     val title: TextView = v.findViewById(R.id.posterTitle)
+    val note: TextView = v.findViewById(R.id.posterNote)
 }
 
-class PosterAdapter(private val onClick: (Title) -> Unit) : RecyclerView.Adapter<PosterVH>() {
+class PosterAdapter(
+    private val onClick: (Title) -> Unit,
+    private val onLongClick: (Title) -> Boolean = { false },
+) : RecyclerView.Adapter<PosterVH>() {
 
     private val items = mutableListOf<Title>()
 
@@ -140,6 +144,13 @@ class PosterAdapter(private val onClick: (Title) -> Unit) : RecyclerView.Adapter
         notifyItemRangeInserted(start, more.size)
     }
 
+    fun remove(t: Title) {
+        val idx = items.indexOfFirst { it.type == t.type && it.id == t.id }
+        if (idx < 0) return
+        items.removeAt(idx)
+        notifyItemRemoved(idx)
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
         PosterVH(LayoutInflater.from(parent.context).inflate(R.layout.item_poster, parent, false))
 
@@ -153,8 +164,11 @@ class PosterAdapter(private val onClick: (Title) -> Unit) : RecyclerView.Adapter
             placeholder(R.drawable.poster_placeholder)
             error(R.drawable.poster_placeholder)
         }
-        h.itemView.contentDescription = t.name
+        h.note.text = t.note
+        h.note.visibility = if (t.note.isNullOrBlank()) View.GONE else View.VISIBLE
+        h.itemView.contentDescription = listOfNotNull(t.name, t.note).joinToString(", ")
         h.itemView.setOnClickListener { onClick(t) }
+        h.itemView.setOnLongClickListener { onLongClick(t) }
         h.itemView.onFocusChangeListener = Focus.scale
     }
 }
