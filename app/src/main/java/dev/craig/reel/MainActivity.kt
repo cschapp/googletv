@@ -544,6 +544,10 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        // Personal rows normally show everything; with "included only" on, search and
+        // continue-watching are checked like any other row. Recent is history, so it's never filtered.
+        val raw = choice === GenreChoice.Recent || (choice.personal && !prefs.includedOnly)
+
         loading = true
         if (page == 0) showStatus("Loading…", busy = true)
         try {
@@ -556,8 +560,8 @@ class MainActivity : ComponentActivity() {
                 if (gen != generation) return
                 page = res.page
                 totalPages = res.totalPages
-                if (page == 1 && posterAdapter.itemCount == 0 && !choice.personal) showStatus("Checking your apps…", busy = true)
-                found += if (choice.personal) {
+                if (page == 1 && posterAdapter.itemCount == 0 && !raw) showStatus("Checking your apps…", busy = true)
+                found += if (raw) {
                     res.items
                 } else {
                     client.onlyStreamingOn(res.items, ids, prefs.region) { t, on ->
@@ -641,9 +645,11 @@ class MainActivity : ComponentActivity() {
         GenreChoice.Watchlist -> "Nothing on your Trakt watchlist streams on your apps right now."
         GenreChoice.ForYou -> "None of Trakt's picks for you stream on your apps right now."
         GenreChoice.Trending -> "Nothing trending streams on your apps right now."
-        GenreChoice.Continue -> "Trakt has nothing in progress."
+        GenreChoice.Continue ->
+            if (prefs.includedOnly) "Nothing you're part-way through streams on your apps right now." else "Trakt has nothing in progress."
         GenreChoice.Recent -> "Nothing opened from Reel yet."
-        is GenreChoice.Search -> "TMDB found nothing for “${choice.query}”."
+        is GenreChoice.Search ->
+            if (prefs.includedOnly) "Nothing matching “${choice.query}” is included with your apps." else "TMDB found nothing for “${choice.query}”."
         else -> "Nothing in your apps for this genre right now."
     }
 
@@ -765,7 +771,7 @@ class MainActivity : ComponentActivity() {
             streaming = streaming.filter { it.label != YOUTUBE }
             youtubeGone = true
         }
-        val rentOn = if (avail == null) emptyList() else installed.filter { it.hasAny(avail.rentBuy) && it !in streaming }
+        val rentOn = if (avail == null || prefs.includedOnly) emptyList() else installed.filter { it.hasAny(avail.rentBuy) && it !in streaming }
         // Providers that stream it and aren't one of your installed apps, matched by id (so
         // "Amazon Prime Video" counts as the Prime Video app, not as somewhere else).
         val mine = installed.flatMap { providerIds[it.label] ?: emptySet() }.toSet()
@@ -992,8 +998,10 @@ class MainActivity : ComponentActivity() {
         }
         val place = prefs.weatherPlace?.takeIf { it.query == prefs.weatherQuery }
         val weatherLabel = "Weather location (${place?.name?.ifBlank { null } ?: prefs.weatherQuery.ifBlank { "auto" }})"
+        val rentLabel = if (prefs.includedOnly) "Rent, buy & unavailable titles: hidden" else "Rent, buy & unavailable titles: shown"
         val items = arrayOf(
             "Streaming apps",
+            rentLabel,
             traktLabel,
             weatherLabel,
             "TMDB API key",
@@ -1006,7 +1014,13 @@ class MainActivity : ComponentActivity() {
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> showProviderPicker()
-                    1 -> when {
+                    1 -> {
+                        prefs.includedOnly = !prefs.includedOnly
+                        toast(if (prefs.includedOnly) "Showing only what's included with your apps" else "Showing rent, buy and unavailable titles too")
+                        // Search and Continue watching are filtered differently now; redraw if one is open.
+                        currentGenre?.takeIf { it.personal && it != GenreChoice.Recent }?.let { selectGenre(it) }
+                    }
+                    2 -> when {
                         t == null -> linkTrakt()
                         t.isLinked -> {
                             t.unlink()
@@ -1016,7 +1030,7 @@ class MainActivity : ComponentActivity() {
                         }
                         else -> linkTrakt()
                     }
-                    2 -> promptText("Weather location (city or postcode, blank = auto)", prefs.weatherQuery) {
+                    3 -> promptText("Weather location (city or postcode, blank = auto)", prefs.weatherQuery) {
                         prefs.weatherQuery = it
                         lifecycleScope.launch {
                             val p = try { resolvePlace() } catch (e: Exception) { null }
@@ -1024,19 +1038,19 @@ class MainActivity : ComponentActivity() {
                             startWeather()
                         }
                     }
-                    3 -> promptText("TMDB API key", prefs.tmdbKey) {
+                    4 -> promptText("TMDB API key", prefs.tmdbKey) {
                         prefs.tmdbKey = it
                         initCatalog()
                     }
-                    4 -> promptText("Region (2-letter country code)", prefs.region) {
+                    5 -> promptText("Region (2-letter country code)", prefs.region) {
                         prefs.region = it
                         initCatalog()
                     }
-                    5 -> {
+                    6 -> {
                         prefs.hiddenApps = emptySet()
                         loadApps()
                     }
-                    6 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
+                    7 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
                 }
             }
             .show()

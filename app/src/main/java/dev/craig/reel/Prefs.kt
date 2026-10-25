@@ -33,6 +33,14 @@ class Prefs(ctx: Context) {
         get() = (sp.getString("app_order", null) ?: "").split('\n').filter { it.isNotBlank() }
         set(v) = sp.edit().putString("app_order", v.joinToString("\n")).apply()
 
+    /**
+     * Only ever show what's included with your apps: search and continue-watching rows drop
+     * titles that aren't, and the detail panel leaves out "Rent or buy on …".
+     */
+    var includedOnly: Boolean
+        get() = sp.getBoolean("included_only", false)
+        set(v) = sp.edit().putBoolean("included_only", v).apply()
+
     var disabledProviders: Set<String>
         get() = sp.getStringSet("disabled_providers", null)?.toSet() ?: emptySet()
         set(v) = sp.edit().putStringSet("disabled_providers", v).apply()
