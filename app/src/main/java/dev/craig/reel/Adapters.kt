@@ -131,23 +131,28 @@ class PosterAdapter(
 ) : RecyclerView.Adapter<PosterVH>() {
 
     private val items = mutableListOf<Title>()
+    /** type/id of everything shown, so a title that drifts across TMDB pages isn't shown twice. */
+    private val keys = HashSet<Pair<MediaType, Int>>()
 
     fun clear() {
         items.clear()
+        keys.clear()
         notifyDataSetChanged()
     }
 
     fun append(more: List<Title>) {
-        if (more.isEmpty()) return
+        val fresh = more.filter { keys.add(it.type to it.id) }
+        if (fresh.isEmpty()) return
         val start = items.size
-        items.addAll(more)
-        notifyItemRangeInserted(start, more.size)
+        items.addAll(fresh)
+        notifyItemRangeInserted(start, fresh.size)
     }
 
     fun remove(t: Title) {
         val idx = items.indexOfFirst { it.type == t.type && it.id == t.id }
         if (idx < 0) return
         items.removeAt(idx)
+        keys.remove(t.type to t.id)
         notifyItemRemoved(idx)
     }
 
