@@ -27,6 +27,7 @@ The wrapper jar isn't checked in. Generate it once:
 - Remote is `git@github.com-personal:cschapp/googletv.git`. The `github.com-personal` alias in `~/.ssh/config` uses the personal key `~/.ssh/id_ed25519_github_personal`, so pushes work without touching `gh` accounts.
 - Craig's personal GitHub login is `cschapp`; work is `cschappa-fresh`, which stays the active `gh` account. Only `gh` CLI commands on this repo (e.g. `gh pr create`) need `gh auth switch -u cschapp`; switch back with `gh auth switch -u cschappa-fresh`.
 - Commit identity (Craig Schappacher / cschapp@gmail.com) comes from an includeIf in `~/.config/git/config` for everything under `~/Projects/googletv/`. Do not set user.name/email in this repo.
+- The Claude Code status line is `ccstatusline` (`~/.claude/settings.json` -> `~/.config/ccstatusline/settings.json`). Its top row shows the git account before the branch via the custom-command widget `~/.config/ccstatusline/git-account.sh`, which maps the resolved git email to `cschapp` or `cschappa-fresh`. Check it before committing.
 
 ## Workflow
 
