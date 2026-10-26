@@ -22,6 +22,12 @@ The wrapper jar isn't checked in. Generate it once:
 
     JAVA_HOME=~/.local/share/mise/installs/java/17 ~/.local/share/mise/installs/gradle/8.11.1/gradle-8.11.1/bin/gradle wrapper --gradle-version 8.11.1
 
+## Git remote and accounts
+
+- Remote is `git@github.com-personal:cschapp/googletv.git`. The `github.com-personal` alias in `~/.ssh/config` uses the personal key `~/.ssh/id_ed25519_github_personal`, so pushes work without touching `gh` accounts.
+- Craig's personal GitHub login is `cschapp`; work is `cschappa-fresh`, which stays the active `gh` account. Only `gh` CLI commands on this repo (e.g. `gh pr create`) need `gh auth switch -u cschapp`; switch back with `gh auth switch -u cschappa-fresh`.
+- Commit identity (Craig Schappacher / cschapp@gmail.com) comes from an includeIf in `~/.config/git/config` for everything under `~/Projects/googletv/`. Do not set user.name/email in this repo.
+
 ## Workflow
 
     JAVA_HOME=~/.local/share/mise/installs/java/17 ./gradlew assembleDebug
