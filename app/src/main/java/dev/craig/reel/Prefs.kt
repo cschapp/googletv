@@ -137,10 +137,10 @@ class Prefs(ctx: Context) {
         get() = sp.getString("trakt_client_secret", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.TRAKT_CLIENT_SECRET
         set(v) = sp.edit().putString("trakt_client_secret", v.trim()).apply()
 
-    var traktToken: TraktToken?
+    var traktToken: OAuthToken?
         get() {
             val access = sp.getString("trakt_access", null)?.takeIf { it.isNotBlank() } ?: return null
-            return TraktToken(
+            return OAuthToken(
                 access = access,
                 refresh = sp.getString("trakt_refresh", "") ?: "",
                 expiresAt = sp.getLong("trakt_expires", 0L),
@@ -156,10 +156,111 @@ class Prefs(ctx: Context) {
         get() = sp.getString("trakt_user", null) ?: ""
         set(v) = sp.edit().putString("trakt_user", v).apply()
 
+    // ---------- YouTube subscriptions ----------
+
+    var googleClientId: String
+        get() = sp.getString("google_client_id", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.GOOGLE_CLIENT_ID
+        set(v) = sp.edit().putString("google_client_id", v.trim()).apply()
+
+    var googleClientSecret: String
+        get() = sp.getString("google_client_secret", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.GOOGLE_CLIENT_SECRET
+        set(v) = sp.edit().putString("google_client_secret", v.trim()).apply()
+
+    var googleToken: OAuthToken?
+        get() {
+            val access = sp.getString("google_access", null)?.takeIf { it.isNotBlank() } ?: return null
+            return OAuthToken(
+                access = access,
+                refresh = sp.getString("google_refresh", "") ?: "",
+                expiresAt = sp.getLong("google_expires", 0L),
+            )
+        }
+        set(v) = sp.edit()
+            .putString("google_access", v?.access)
+            .putString("google_refresh", v?.refresh)
+            .putLong("google_expires", v?.expiresAt ?: 0L)
+            .apply()
+
+    var youtubeRowHidden: Boolean
+        get() = sp.getBoolean("youtube_row_hidden", false)
+        set(v) = sp.edit().putBoolean("youtube_row_hidden", v).apply()
+
+    var youtubeRowSort: RowSort
+        get() = RowSort.entries.firstOrNull { it.name == sp.getString("youtube_row_sort", null) } ?: RowSort.MOST_WATCHED
+        set(v) = sp.edit().putString("youtube_row_sort", v.name).apply()
+
+    var youtubeThumbSize: ThumbSize
+        get() = ThumbSize.entries.firstOrNull { it.name == sp.getString("youtube_thumb_size", null) } ?: ThumbSize.SMALL
+        set(v) = sp.edit().putString("youtube_thumb_size", v.name).apply()
+
+    /** Seconds of YouTube you've played per channel, keyed by [WatchLog.channelKey]. */
+    val channelWatchSecs: Map<String, Long>
+        get() {
+            val o = runCatching { JSONObject(sp.getString("youtube_channel_secs", null) ?: "{}") }.getOrDefault(JSONObject())
+            return o.keys().asSequence().associateWith { o.optLong(it) }
+        }
+
+    fun addChannelWatchSecs(channel: String, secs: Long) {
+        if (channel.isBlank() || secs <= 0) return
+        val m = channelWatchSecs.toMutableMap()
+        m[channel] = (m[channel] ?: 0L) + secs
+        sp.edit().putString("youtube_channel_secs", JSONObject(m as Map<*, *>).toString()).apply()
+    }
+
+    /** Videos you've watched, as [WatchLog.videoKey]s, oldest first. */
+    val watchedVideos: Set<String>
+        get() = (sp.getString("youtube_watched", null) ?: "").split('\n').filter { it.isNotBlank() }.toCollection(LinkedHashSet())
+
+    fun markVideosWatched(keys: Collection<String>) {
+        val now = watchedVideos
+        if (now.containsAll(keys)) return
+        sp.edit().putString("youtube_watched", (now + keys).toList().takeLast(MAX_WATCHED_VIDEOS).joinToString("\n")).apply()
+    }
+
+    fun markVideoUnwatched(key: String) {
+        val now = watchedVideos
+        if (key !in now) return
+        sp.edit().putString("youtube_watched", (now - key).joinToString("\n")).apply()
+    }
+
+    /**
+     * Channels you watch in order: channel id -> publish time of the video you chose to start from.
+     * Anything older counts as watched; the row shows the oldest unwatched one from there on.
+     */
+    val inOrderChannels: Map<String, Long>
+        get() {
+            val o = runCatching { JSONObject(sp.getString("youtube_in_order", null) ?: "{}") }.getOrDefault(JSONObject())
+            return o.keys().asSequence().associateWith { o.optLong(it) }
+        }
+
+    fun setInOrder(channelId: String, start: Long?) {
+        val m = inOrderChannels.toMutableMap()
+        if (start == null) m.remove(channelId) else m[channelId] = start
+        sp.edit().putString("youtube_in_order", JSONObject(m as Map<*, *>).toString()).apply()
+    }
+
     companion object {
         private const val MAX_RECENT = 8
         private const val MAX_RECENT_TITLES = 40
+        private const val MAX_WATCHED_VIDEOS = 2000
     }
+}
+
+/** How the YouTube row orders its channels. */
+enum class RowSort(val label: String) {
+    /** Channels you spend the most time on first (your TV watch time, then YouTube's own ranking), then newest upload. */
+    MOST_WATCHED("Most watched channels first"),
+    /** Newest upload first, whoever posted it. */
+    NEWEST("Newest uploads first"),
+    /** Channels you watch in order first, then the rest; each group newest upload first. */
+    IN_ORDER("Watch in order channels first"),
+}
+
+/** Thumbnail width in the YouTube row; height follows at 16:9. */
+enum class ThumbSize(val label: String, val widthDp: Int) {
+    SMALL("Small", 176),
+    MEDIUM("Medium", 224),
+    LARGE("Large", 288),
 }
 
 /** A title you opened from Reel, and which app it went to. */

@@ -14,7 +14,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
-data class TraktToken(val access: String, val refresh: String, val expiresAt: Long)
+/** A device-code login's tokens; Trakt and Google both store one. */
+data class OAuthToken(val access: String, val refresh: String, val expiresAt: Long)
 
 /** What the TV shows while you enter the code on trakt.tv/activate. [verifier] is the PKCE secret for this attempt. */
 data class DeviceCode(
@@ -100,7 +101,7 @@ class Trakt(private val clientId: String, private val clientSecret: String, priv
     }
 
     private fun saveToken(j: JSONObject) {
-        prefs.traktToken = TraktToken(
+        prefs.traktToken = OAuthToken(
             access = j.getString("access_token"),
             refresh = j.optString("refresh_token"),
             expiresAt = (j.optLong("created_at", System.currentTimeMillis() / 1000) + j.optLong("expires_in", 7776000)) * 1000,

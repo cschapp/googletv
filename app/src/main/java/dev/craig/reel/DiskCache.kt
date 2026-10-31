@@ -38,6 +38,10 @@ class DiskCache(parent: File) {
         }
     }
 
+    fun remove(key: String) {
+        file(key).delete()
+    }
+
     fun clear() {
         dir.listFiles()?.forEach { it.delete() }
     }

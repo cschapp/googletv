@@ -82,6 +82,145 @@ class AppAdapter(
     }
 }
 
+// ---------- YouTube subscriptions row ----------
+
+/**
+ * What the YouTube row holds: the ⚙ tile first, then either videos or one message card.
+ * A channel page holds only videos. [Clip.more] counts what's waiting after it (in-order channels).
+ */
+sealed class RowItem {
+    object Settings : RowItem()
+    data class Message(val text: String) : RowItem()
+    data class Clip(val video: Video, val more: Int = 0) : RowItem()
+}
+
+class VideoVH(v: View) : RecyclerView.ViewHolder(v) {
+    val thumb: ImageView = v.findViewById(R.id.videoThumb)
+    val title: TextView = v.findViewById(R.id.videoTitle)
+    val note: TextView = v.findViewById(R.id.videoNote)
+}
+
+class TileVH(val text: TextView) : RecyclerView.ViewHolder(text)
+
+class VideoRowAdapter(
+    private val note: (Video) -> String,
+    private val onClick: (Video) -> Unit,
+    private val onLongClick: (Video) -> Unit,
+    private val onSettings: () -> Unit = {},
+    private val onMessage: () -> Unit = {},
+    /** Watched videos are drawn dimmed with a ✓ (the channel page shows them; the row never does). */
+    private val watched: (Video) -> Boolean = { false },
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    init {
+        // Stable ids let the row keep the D-pad on the same card when it's refreshed.
+        setHasStableIds(true)
+    }
+
+    var items: List<RowItem> = emptyList()
+        set(v) {
+            field = v
+            notifyDataSetChanged()
+        }
+
+    var size: ThumbSize = ThumbSize.SMALL
+        set(v) {
+            field = v
+            notifyDataSetChanged()
+        }
+
+    /** The ⚙ tile stays folded away (no width, not focusable) until Left is pressed on the first card. */
+    var settingsShown = false
+        set(v) {
+            if (field == v) return
+            field = v
+            if (items.firstOrNull() == RowItem.Settings) notifyItemChanged(0)
+        }
+
+    override fun getItemCount() = items.size
+
+    override fun getItemId(position: Int): Long = when (val it = items[position]) {
+        RowItem.Settings -> 0L
+        is RowItem.Message -> 1L
+        is RowItem.Clip -> (it.video.id.hashCode().toLong() and 0xffffffffL) + 2
+    }
+
+    override fun getItemViewType(position: Int) = if (items[position] is RowItem.Clip) TYPE_VIDEO else TYPE_TILE
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+        val inflater = LayoutInflater.from(parent.context)
+        return if (viewType == TYPE_VIDEO) {
+            VideoVH(inflater.inflate(R.layout.item_video, parent, false))
+        } else {
+            TileVH(inflater.inflate(R.layout.item_row_tile, parent, false) as TextView)
+        }
+    }
+
+    override fun onBindViewHolder(h: RecyclerView.ViewHolder, position: Int) {
+        val density = h.itemView.resources.displayMetrics.density
+        val w = (size.widthDp * density).toInt()
+        val thumbH = w * 9 / 16
+        when (val item = items[position]) {
+            is RowItem.Clip -> {
+                val v = item.video
+                h as VideoVH
+                h.itemView.layoutParams = h.itemView.layoutParams.apply { width = w + (6 * density).toInt() }
+                h.thumb.layoutParams = h.thumb.layoutParams.apply { height = thumbH }
+                h.thumb.load(v.thumbUrl) {
+                    crossfade(true)
+                    placeholder(R.drawable.poster_placeholder)
+                    error(R.drawable.poster_placeholder)
+                }
+                val seen = watched(v)
+                h.title.text = v.title
+                h.note.text = listOfNotNull(
+                    "✓ Watched".takeIf { seen },
+                    note(v),
+                    "+${item.more} more".takeIf { item.more > 0 },
+                ).joinToString(" · ")
+                h.itemView.alpha = if (seen) 0.45f else 1f
+                h.itemView.contentDescription = "${v.title}, ${h.note.text}"
+                h.itemView.setOnClickListener { onClick(v) }
+                h.itemView.setOnLongClickListener { onLongClick(v); true }
+            }
+            RowItem.Settings -> {
+                h as TileVH
+                h.text.layoutParams = (h.text.layoutParams as ViewGroup.MarginLayoutParams).apply {
+                    width = if (settingsShown) (64 * density).toInt() else 0
+                    height = thumbH + (6 * density).toInt()
+                    marginEnd = if (settingsShown) (14 * density).toInt() else 0
+                }
+                h.text.isFocusable = settingsShown
+                h.text.visibility = if (settingsShown) View.VISIBLE else View.INVISIBLE
+                h.text.text = "⚙"
+                h.text.textSize = 22f
+                h.text.contentDescription = "Row settings"
+                h.text.setOnClickListener { onSettings() }
+            }
+            is RowItem.Message -> {
+                h as TileVH
+                h.text.layoutParams = (h.text.layoutParams as ViewGroup.MarginLayoutParams).apply {
+                    width = maxOf(w * 2, (360 * density).toInt())
+                    height = thumbH + (6 * density).toInt()
+                    marginEnd = (14 * density).toInt()
+                }
+                h.text.isFocusable = true
+                h.text.visibility = View.VISIBLE
+                h.text.text = item.text
+                h.text.textSize = 15f
+                h.text.contentDescription = item.text
+                h.text.setOnClickListener { onMessage() }
+            }
+        }
+        h.itemView.onFocusChangeListener = Focus.scale
+    }
+
+    companion object {
+        private const val TYPE_TILE = 0
+        private const val TYPE_VIDEO = 1
+    }
+}
+
 // ---------- Chips (genres, providers, obscure picker) ----------
 
 class ChipVH(val text: TextView) : RecyclerView.ViewHolder(text)

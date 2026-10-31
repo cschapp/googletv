@@ -46,7 +46,7 @@ object YouTube {
             val conn = url.openConnection() as HttpURLConnection
             conn.connectTimeout = 8_000
             conn.readTimeout = 8_000
-            conn.setRequestProperty("User-Agent", "Reel/0.1 (Android TV)")
+            conn.setRequestProperty("User-Agent", "Reel/${BuildConfig.VERSION_NAME} (Android TV)")
             try {
                 val code = conn.responseCode
                 val result = when (code) {

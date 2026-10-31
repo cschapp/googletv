@@ -101,7 +101,7 @@ query(${'$'}c: Country!, ${'$'}l: Language!, ${'$'}q: String!, ${'$'}t: [ObjectT
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
         conn.setRequestProperty("Accept", "application/json")
-        conn.setRequestProperty("User-Agent", "Reel/0.1 (Android TV)")
+        conn.setRequestProperty("User-Agent", "Reel/${BuildConfig.VERSION_NAME} (Android TV)")
         try {
             conn.outputStream.use { it.write(body.toString().toByteArray()) }
             val code = conn.responseCode

@@ -53,5 +53,16 @@
         <activity
             android:name=".GenrePickerActivity"
             android:exported="false" />
+
+        <!-- Sees what the YouTube app is playing, for the subscriptions row. Granted from adb; see PlaybackWatcher. -->
+        <service
+            android:name=".PlaybackWatcher"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

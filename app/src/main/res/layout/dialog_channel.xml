@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One channel's recent uploads, newest first. Back closes it. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:orientation="vertical"
+    android:paddingStart="36dp"
+    android:paddingTop="24dp"
+    android:paddingEnd="36dp">
+
+    <TextView
+        android:id="@+id/channelTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textColor="@color/text"
+        android:textSize="26sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/channelHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginTop="2dp"
+        android:layout_marginBottom="8dp"
+        android:textColor="@color/text_dim"
+        android:textSize="14sp" />
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <!-- clipToPadding off + padding on every side leaves room for the focus grow on the edge cards -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/channelGrid"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingStart="12dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="24dp" />
+
+        <TextView
+            android:id="@+id/channelStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:maxWidth="640dp"
+            android:textColor="@color/text_dim"
+            android:textSize="16sp" />
+    </FrameLayout>
+</LinearLayout>

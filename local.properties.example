@@ -11,3 +11,9 @@ tmdb.key=
 # New Trakt apps are PKCE-only and have no secret; leave trakt.client_secret blank unless yours has one.
 trakt.client_id=
 trakt.client_secret=
+
+# Optional: Google OAuth client for the YouTube subscriptions row. In Google Cloud console,
+# enable "YouTube Data API v3", then Credentials -> OAuth client ID -> "TVs and Limited Input devices".
+# Can also be pushed via adb (see README).
+google.client_id=
+google.client_secret=

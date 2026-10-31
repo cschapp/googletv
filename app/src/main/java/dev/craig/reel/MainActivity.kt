@@ -13,8 +13,10 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.text.format.DateUtils
 import android.util.Log
+import android.view.FocusFinder
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
@@ -26,6 +28,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.doOnNextLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
@@ -75,6 +78,8 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var appsSection: View
     private lateinit var appsRow: RecyclerView
+    private lateinit var youtubeLabel: View
+    private lateinit var youtubeRow: RecyclerView
     private lateinit var genreRow: RecyclerView
     private lateinit var grid: RecyclerView
     private lateinit var status: TextView
@@ -108,6 +113,14 @@ class MainActivity : ComponentActivity() {
     private val appAdapter = AppAdapter(
         onClick = { if (!Launch.openApp(this, it.pkg)) toast("Couldn't open ${it.label}") },
         onLongClick = { showAppMenu(it) },
+    )
+
+    private val videoAdapter = VideoRowAdapter(
+        note = { listOf(it.channel, ago(it.published)).joinToString(" · ") },
+        onClick = { onVideoClicked(it) },
+        onLongClick = { onVideoLongClicked(it) },
+        onSettings = { showYouTubeRowMenu() },
+        onMessage = { if (subscriptions()?.isLinked == true) refreshYouTube(force = true) else linkYouTube() },
     )
 
     private val genreAdapter = ChipAdapter<GenreChoice>(
@@ -157,6 +170,8 @@ class MainActivity : ComponentActivity() {
 
         appsSection = findViewById(R.id.appsSection)
         appsRow = findViewById(R.id.appsRow)
+        youtubeLabel = findViewById(R.id.youtubeLabel)
+        youtubeRow = findViewById(R.id.youtubeRow)
         genreRow = findViewById(R.id.genreRow)
         grid = findViewById(R.id.grid)
         status = findViewById(R.id.status)
@@ -171,6 +186,10 @@ class MainActivity : ComponentActivity() {
         appsRow.adapter = appAdapter
         // No item animations: rebinding a slot must not swap the focused view out from under the D-pad.
         appsRow.itemAnimator = null
+        youtubeRow.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        youtubeRow.adapter = videoAdapter
+        youtubeRow.itemAnimator = null
+        videoAdapter.size = prefs.youtubeThumbSize
         genreRow.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
         genreRow.adapter = genreAdapter
         grid.layoutManager = GridLayoutManager(this, GRID_COLUMNS)
@@ -195,6 +214,15 @@ class MainActivity : ComponentActivity() {
         window.decorView.viewTreeObserver.addOnGlobalFocusChangeListener { _, newFocus ->
             val v = if (newFocus != null && isInside(newFocus, grid)) View.GONE else View.VISIBLE
             if (appsSection.visibility != v) appsSection.visibility = v
+            // The YouTube row's ⚙ is only there while it has focus; it folds away again when you move off it.
+            // The row may be mid-layout (it re-focuses a card after Mark watched), so don't rebind it then.
+            // Decide when the post runs, not now: unfolding it re-lays the row, which passes focus
+            // through the first card on the way to the ⚙.
+            if (youtubeRow.isComputingLayout) {
+                youtubeRow.post { videoAdapter.settingsShown = rowSettingsFocused() }
+            } else {
+                videoAdapter.settingsShown = rowSettingsFocused()
+            }
         }
 
         // A launcher never exits on Back; jump back up toward the top instead.
@@ -231,6 +259,9 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // The app row is rebuilt only when a package was installed, removed or updated while away.
         if (appsDirty) loadApps()
+        // Back from YouTube: drop what you just watched, and pick up new uploads now and then.
+        refreshYouTube()
+        channelPage?.notifyDataSetChanged()
         startWeather()
         startGreeting()
     }
@@ -329,6 +360,12 @@ class MainActivity : ComponentActivity() {
             toast("Trakt client id saved")
         }
         i?.getStringExtra("trakt_client_secret")?.takeIf { it.isNotBlank() }?.let { prefs.traktClientSecret = it }
+        i?.getStringExtra("google_client_id")?.takeIf { it.isNotBlank() }?.let {
+            prefs.googleClientId = it
+            toast("Google client id saved")
+            if (::youtubeRow.isInitialized) refreshYouTube()
+        }
+        i?.getStringExtra("google_client_secret")?.takeIf { it.isNotBlank() }?.let { prefs.googleClientSecret = it }
         i?.getStringExtra("weather")?.let {
             prefs.weatherQuery = it
             if (::weather.isInitialized) startWeather()
@@ -480,6 +517,18 @@ class MainActivity : ComponentActivity() {
 
     /** While an app is being moved, the D-pad rearranges instead of navigating. */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (moving == null && event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && genreRow.hasFocus() &&
+            appsSection.visibility == View.VISIBLE && posterAdapter.itemCount > 0
+        ) {
+            if (event.action == KeyEvent.ACTION_DOWN) dropIntoGrid()
+            return true
+        }
+        if (moving == null && event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT && !videoAdapter.settingsShown &&
+            youtubeRow.focusedChild?.let { youtubeRow.getChildAdapterPosition(it) } == 1
+        ) {
+            if (event.action == KeyEvent.ACTION_DOWN) revealRowSettings()
+            return true
+        }
         val e = moving ?: return super.dispatchKeyEvent(event)
         val handled = when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
@@ -496,6 +545,20 @@ class MainActivity : ComponentActivity() {
             }
         }
         return true
+    }
+
+    /**
+     * Down from the genres. The rows above can leave the grid too short to hold a focusable
+     * poster, so collapse them first (as browsing the grid would anyway), then step down.
+     */
+    private fun dropIntoGrid() {
+        val from = currentFocus ?: return
+        appsSection.visibility = View.GONE
+        grid.doOnNextLayout {
+            val next = FocusFinder.getInstance().findNextFocus(window.decorView as ViewGroup, from, View.FOCUS_DOWN)
+                ?: grid.getChildAt(0)
+            if (next?.requestFocus() != true) appsSection.visibility = View.VISIBLE
+        }
     }
 
     private fun confirmHide(e: AppEntry) {
@@ -932,13 +995,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openTrailer(key: String) {
-        val url = "https://www.youtube.com/watch?v=$key"
+        if (!openYouTube(key)) toast("No app can play the trailer")
+    }
+
+    /** Play a video in the YouTube app, or whatever handles the link. */
+    private fun openYouTube(videoId: String): Boolean {
+        val url = "https://www.youtube.com/watch?v=$videoId"
         val yt = ProviderCatalog.apps.first { it.label == YOUTUBE }.packages
             .firstOrNull { Launch.launchIntent(packageManager, it) != null }
         val direct = yt?.let { Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage(it) }
-        if (direct == null || !Launch.start(this, direct)) {
-            if (!Launch.start(this, Intent(Intent.ACTION_VIEW, Uri.parse(url)))) toast("No app can play the trailer")
-        }
+        return (direct != null && Launch.start(this, direct)) || Launch.start(this, Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     }
 
     /** Run [block], returning null on failure. Cancellation still propagates. */
@@ -1113,6 +1179,365 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ---------- YouTube subscriptions ----------
+
+    /** Recent uploads from every subscription; the row is picked from these each time it's drawn. */
+    private var uploads: List<Video>? = null
+    /** Channel id -> position in YouTube's "most relevant" order of your subscriptions. */
+    private var channelRank: Map<String, Int> = emptyMap()
+    private var uploadsAt = 0L
+    private var uploadsError: String? = null
+    private var youtubeJob: Job? = null
+
+    private fun subscriptions(): Subscriptions? {
+        val id = prefs.googleClientId
+        return if (id.isBlank()) null else Subscriptions(id, prefs.googleClientSecret, prefs, cache)
+    }
+
+    /** Redraw the row from what's known, and fetch uploads again when they're stale (or [force]). */
+    private fun refreshYouTube(force: Boolean = false) {
+        val hidden = prefs.youtubeRowHidden
+        youtubeLabel.visibility = if (hidden) View.GONE else View.VISIBLE
+        youtubeRow.visibility = if (hidden) View.GONE else View.VISIBLE
+        if (hidden) {
+            youtubeJob?.cancel()
+            return
+        }
+        val subs = subscriptions()?.takeIf { it.isLinked }
+        if (subs == null) uploads = null
+        renderYouTube()
+        val stale = force || uploads == null || SystemClock.elapsedRealtime() - uploadsAt > YOUTUBE_REFRESH_MS
+        if (subs == null || !stale || youtubeJob?.isActive == true) return
+        youtubeJob = lifecycleScope.launch {
+            try {
+                channelRank = subs.channels().withIndex().associate { it.value.id to it.index }
+                uploads = subs.recentUploads(prefs.inOrderChannels)
+                uploadsAt = SystemClock.elapsedRealtime()
+                uploadsError = null
+                mark("youtube row loaded")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Keep showing the last good uploads, if any.
+                uploadsError = e.message ?: "network error"
+            }
+            renderYouTube()
+        }
+    }
+
+    private fun renderYouTube() {
+        val linked = subscriptions()?.isLinked == true
+        val all = uploads
+        val body = when {
+            !linked -> listOf(RowItem.Message("▶  Link YouTube to see new videos from your subscriptions"))
+            all == null -> listOf(RowItem.Message(uploadsError?.let { "Couldn't load YouTube: $it" } ?: "Loading your subscriptions…"))
+            else -> Subscriptions.pickRow(all, prefs.watchedVideos, prefs.channelWatchSecs, prefs.inOrderChannels, channelRank, prefs.youtubeRowSort)
+                .map { RowItem.Clip(it.video, it.more) }
+                .ifEmpty { listOf(RowItem.Message("Nothing new from your subscriptions")) }
+        }
+        // If the card under the D-pad goes (you just watched it), land on whatever takes its place.
+        val focused = youtubeRow.focusedChild?.let { youtubeRow.getChildAdapterPosition(it) } ?: RecyclerView.NO_POSITION
+        val items = listOf(RowItem.Settings) + body
+        videoAdapter.items = items
+        if (focused != RecyclerView.NO_POSITION) {
+            val idx = focused.coerceAtMost(items.size - 1)
+            youtubeRow.post { youtubeRow.layoutManager?.findViewByPosition(idx)?.requestFocus() }
+        }
+    }
+
+    private fun onVideoClicked(v: Video) {
+        if (!openYouTube(v.id)) return toast("Couldn't open YouTube")
+        // Without playback tracking, opening it is the best sign you watched it.
+        if (!PlaybackWatcher.isEnabled(this)) prefs.markVideosWatched(listOf(v.watchKey))
+    }
+
+    private fun onVideoLongClicked(v: Video) {
+        val ch = Channel(v.channelId, v.channel)
+        val inOrder = v.channelId in prefs.inOrderChannels
+        val actions = listOfNotNull(
+            "Mark watched" to {
+                prefs.markVideosWatched(listOf(v.watchKey))
+                renderYouTube()
+            },
+            "More from ${v.channel}" to { showChannelPage(ch, picking = false) },
+            if (inOrder) "Start ${v.channel} somewhere else…" to { showChannelPage(ch, picking = true) } else null,
+            if (inOrder) {
+                "Stop watching ${v.channel} in order" to {
+                    prefs.setInOrder(v.channelId, null)
+                    toast("${v.channel}: back to the newest video")
+                    refreshYouTube(force = true)
+                }
+            } else {
+                "Watch ${v.channel} in order…" to { showChannelPage(ch, picking = true) }
+            },
+        )
+        AlertDialog.Builder(this)
+            .setTitle(v.title)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .show()
+    }
+
+    // ---------- YouTube channel page ----------
+
+    /** The open channel page's adapter, redrawn when you come back from playing one of its videos. */
+    private var channelPage: VideoRowAdapter? = null
+
+    /** Marked as watched, or older than where you started watching its channel in order. */
+    private fun isWatched(v: Video): Boolean =
+        v.watchKey in prefs.watchedVideos || prefs.inOrderChannels[v.channelId]?.let { v.published < it } == true
+
+    /**
+     * A channel's latest 50 uploads, newest first, watched ones dimmed. With [picking], choosing a
+     * video starts watching the channel in order from it; otherwise it plays, and long-press offers
+     * the rest.
+     */
+    private fun showChannelPage(ch: Channel, picking: Boolean) {
+        val subs = subscriptions()?.takeIf { it.isLinked } ?: return toast("Link YouTube first")
+        val dialog = Dialog(this, R.style.Theme_Reel_Detail)
+        dialog.setContentView(R.layout.dialog_channel)
+        val grid = dialog.findViewById<RecyclerView>(R.id.channelGrid)
+        val status = dialog.findViewById<TextView>(R.id.channelStatus)
+        dialog.findViewById<TextView>(R.id.channelTitle).text = ch.name
+        val hint = dialog.findViewById<TextView>(R.id.channelHint)
+        fun updateHint() {
+            val start = prefs.inOrderChannels[ch.id]
+            hint.text = when {
+                picking -> "Pick the first video you haven't seen. Reel lines up the rest in order, oldest first."
+                start != null -> "Watching in order from ${DateUtils.formatDateTime(this, start, DateUtils.FORMAT_ABBREV_MONTH)}. Long-press a video for more."
+                else -> "Long-press a video to mark it watched or to start watching in order there."
+            }
+        }
+        updateHint()
+
+        var videos: List<Video> = emptyList()
+        val adapter = VideoRowAdapter(
+            note = { ago(it.published) },
+            onClick = { v ->
+                if (picking) {
+                    dialog.dismiss()
+                    startInOrder(v)
+                } else {
+                    onVideoClicked(v)
+                }
+            },
+            onLongClick = { v -> showChannelVideoMenu(v, videos, onChange = ::updateHint) },
+            watched = { isWatched(it) },
+        )
+        adapter.size = ThumbSize.SMALL
+        val density = resources.displayMetrics.density
+        // Card width plus its end margin; as many columns as fit beside the page margins.
+        val span = ((resources.displayMetrics.widthPixels - 96 * density) / ((ThumbSize.SMALL.widthDp + 6 + 14) * density)).toInt()
+        grid.layoutManager = GridLayoutManager(this, span.coerceAtLeast(1))
+        grid.addItemDecoration(object : RecyclerView.ItemDecoration() {
+            override fun getItemOffsets(out: android.graphics.Rect, v: View, parent: RecyclerView, state: RecyclerView.State) {
+                out.bottom = (14 * density).toInt()
+            }
+        })
+        grid.adapter = adapter
+        channelPage = adapter
+
+        val job = lifecycleScope.launch {
+            status.text = "Loading…"
+            try {
+                videos = subs.channelUploads(ch)
+                adapter.items = videos.map { RowItem.Clip(it) }
+                if (videos.isEmpty()) {
+                    status.text = "No uploads found."
+                } else {
+                    status.visibility = View.GONE
+                    grid.post { grid.getChildAt(0)?.requestFocus() }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                status.text = "Couldn't load ${ch.name}: ${e.message}"
+            }
+        }
+        dialog.setOnDismissListener {
+            job.cancel()
+            channelPage = null
+            renderYouTube()
+        }
+        dialog.show()
+    }
+
+    private fun showChannelVideoMenu(v: Video, videos: List<Video>, onChange: () -> Unit) {
+        val marked = v.watchKey in prefs.watchedVideos
+        val actions = listOf(
+            if (marked) {
+                "Mark unwatched" to { prefs.markVideoUnwatched(v.watchKey) }
+            } else {
+                "Mark watched" to { prefs.markVideosWatched(listOf(v.watchKey)) }
+            },
+            "Mark watched up to here" to {
+                prefs.markVideosWatched(videos.filter { it.published <= v.published }.map { it.watchKey })
+            },
+            "Watch in order from here" to { startInOrder(v) },
+        )
+        AlertDialog.Builder(this)
+            .setTitle(v.title)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+                channelPage?.notifyDataSetChanged()
+                onChange()
+            }
+            .show()
+    }
+
+    /** From [v] on, the channel's card shows its oldest unwatched video instead of its newest. */
+    private fun startInOrder(v: Video) {
+        prefs.setInOrder(v.channelId, v.published)
+        toast("${v.channel}: watching in order from “${v.title}”")
+        refreshYouTube(force = true)
+    }
+
+    private fun rowSettingsFocused(): Boolean {
+        val f = currentFocus ?: return false
+        return f.parent === youtubeRow && youtubeRow.getChildAdapterPosition(f) == 0
+    }
+
+    /** Left from the first card: unfold the ⚙ tile in front of it and step onto it. */
+    private fun revealRowSettings() {
+        videoAdapter.settingsShown = true
+        youtubeRow.doOnNextLayout {
+            youtubeRow.scrollToPosition(0)
+            youtubeRow.layoutManager?.findViewByPosition(0)?.requestFocus()
+        }
+    }
+
+    /** The ⚙ tile at the left end of the row. */
+    private fun showYouTubeRowMenu() {
+        val linked = subscriptions()?.isLinked == true
+        val tracking = PlaybackWatcher.isEnabled(this)
+        val actions = listOfNotNull(
+            "Hide this row" to ::hideYouTubeRow,
+            "Sort: ${prefs.youtubeRowSort.label}" to ::showRowSortPicker,
+            "Thumbnail size (${prefs.youtubeThumbSize.label})" to ::showThumbSizePicker,
+            ("Refresh" to { refreshYouTube(force = true) }).takeIf { linked },
+            (if (tracking) "Watch tracking: on" else "Watch tracking: off") to ::explainWatchTracking,
+            if (linked) "Unlink YouTube" to ::unlinkYouTube else "Link YouTube" to ::linkYouTube,
+        )
+        AlertDialog.Builder(this)
+            .setTitle("YouTube row")
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .show()
+    }
+
+    private fun hideYouTubeRow() {
+        prefs.youtubeRowHidden = true
+        refreshYouTube()
+        appsRow.getChildAt(0)?.requestFocus()
+        toast("Row hidden. Bring it back from ⚙ → YouTube row")
+    }
+
+    private fun showRowSortPicker() {
+        val sorts = RowSort.entries
+        AlertDialog.Builder(this)
+            .setTitle("Sort the YouTube row")
+            .setSingleChoiceItems(sorts.map { it.label }.toTypedArray(), sorts.indexOf(prefs.youtubeRowSort)) { d, which ->
+                d.dismiss()
+                if (sorts[which] != prefs.youtubeRowSort) {
+                    prefs.youtubeRowSort = sorts[which]
+                    renderYouTube()
+                    youtubeRow.scrollToPosition(0)
+                }
+            }
+            .show()
+    }
+
+    private fun showThumbSizePicker() {
+        val sizes = ThumbSize.entries
+        AlertDialog.Builder(this)
+            .setTitle("Thumbnail size")
+            .setSingleChoiceItems(sizes.map { it.label }.toTypedArray(), sizes.indexOf(prefs.youtubeThumbSize)) { d, which ->
+                d.dismiss()
+                prefs.youtubeThumbSize = sizes[which]
+                videoAdapter.size = sizes[which]
+            }
+            .show()
+    }
+
+    private fun explainWatchTracking() {
+        val on = PlaybackWatcher.isEnabled(this)
+        AlertDialog.Builder(this)
+            .setTitle(if (on) "Watch tracking is on" else "Watch tracking is off")
+            .setMessage(
+                if (on) {
+                    "Reel sees what the YouTube app plays, wherever you start it. A video drops off this row once " +
+                        "you've played most of it, and channels you spend the most time on come first."
+                } else {
+                    "Reel can see what the YouTube app plays once it has notification access, so videos you " +
+                        "watch drop off this row and your most-watched channels come first. Google TV hides " +
+                        "that setting; from your PC run:\n\n${PlaybackWatcher.GRANT_COMMAND}\n\n" +
+                        "Until then, opening a video from this row counts as watching it."
+                },
+            )
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun unlinkYouTube() {
+        subscriptions()?.unlink()
+        toast("YouTube unlinked")
+        refreshYouTube()
+    }
+
+    private fun linkYouTube() {
+        val subs = subscriptions()
+        if (subs == null) {
+            AlertDialog.Builder(this)
+                .setTitle("YouTube needs a Google client ID")
+                .setMessage(
+                    "In console.cloud.google.com, enable YouTube Data API v3, then create an OAuth client ID " +
+                        "of type “TVs and Limited Input devices”. Then from your PC:\n\n" +
+                        "adb shell am start -n dev.craig.reel/.MainActivity --es google_client_id ID " +
+                        "--es google_client_secret SECRET",
+                )
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        var done = false
+        var dialog: AlertDialog? = null
+        val job = lifecycleScope.launch {
+            val code = try {
+                subs.requestCode()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast("Couldn't reach Google: ${e.message}")
+                return@launch
+            }
+            dialog = AlertDialog.Builder(this@MainActivity)
+                .setTitle("Link YouTube")
+                .setMessage("On your phone or PC, go to\n${code.url}\n\nand enter this code:\n\n${code.userCode}")
+                .setNegativeButton("Cancel", null)
+                .create()
+            dialog?.show()
+            val ok = try {
+                subs.waitForApproval(code)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast("Google: ${e.message}")
+                false
+            }
+            done = true
+            dialog?.dismiss()
+            if (ok) {
+                toast("YouTube linked")
+                refreshYouTube(force = true)
+            } else {
+                toast("YouTube link didn't complete")
+            }
+        }
+        lifecycleScope.launch {
+            // Cancelling the dialog stops the polling.
+            while (dialog == null && job.isActive) delay(100)
+            dialog?.setOnDismissListener { if (!done) job.cancel() }
+        }
+    }
+
     // ---------- Settings ----------
 
     private fun showSettings() {
@@ -1125,11 +1550,14 @@ class MainActivity : ComponentActivity() {
         val place = prefs.weatherPlace?.takeIf { it.query == prefs.weatherQuery }
         val weatherLabel = "Weather location (${place?.name?.ifBlank { null } ?: prefs.weatherQuery.ifBlank { "auto" }})"
         val rentLabel = if (prefs.includedOnly) "Rent, buy & unavailable titles: hidden" else "Rent, buy & unavailable titles: shown"
+        val youtubeLinked = subscriptions()?.isLinked == true
         val items = arrayOf(
             "Your name (${prefs.userName.ifBlank { "not set" }})",
             "Streaming apps",
             rentLabel,
             traktLabel,
+            if (youtubeLinked) "Unlink YouTube" else "Link YouTube",
+            if (prefs.youtubeRowHidden) "YouTube row: hidden" else "YouTube row: shown",
             weatherLabel,
             "TMDB API key",
             "Region (${prefs.region})",
@@ -1138,7 +1566,7 @@ class MainActivity : ComponentActivity() {
             "Android TV settings",
         )
         AlertDialog.Builder(this)
-            .setTitle("Reel settings")
+            .setTitle("Reel settings · v${BuildConfig.VERSION_NAME}")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> promptText("Your name, for the greeting", prefs.userName) {
@@ -1162,7 +1590,12 @@ class MainActivity : ComponentActivity() {
                         }
                         else -> linkTrakt()
                     }
-                    4 -> promptText("Weather location (city or postcode, blank = auto)", prefs.weatherQuery) {
+                    4 -> if (youtubeLinked) unlinkYouTube() else linkYouTube()
+                    5 -> {
+                        prefs.youtubeRowHidden = !prefs.youtubeRowHidden
+                        refreshYouTube()
+                    }
+                    6 -> promptText("Weather location (city or postcode, blank = auto)", prefs.weatherQuery) {
                         prefs.weatherQuery = it
                         lifecycleScope.launch {
                             val p = try { resolvePlace() } catch (e: Exception) { null }
@@ -1170,24 +1603,24 @@ class MainActivity : ComponentActivity() {
                             startWeather()
                         }
                     }
-                    5 -> promptText("TMDB API key", prefs.tmdbKey) {
+                    7 -> promptText("TMDB API key", prefs.tmdbKey) {
                         prefs.tmdbKey = it
                         initCatalog()
                     }
-                    6 -> promptText("Region (2-letter country code)", prefs.region) {
+                    8 -> promptText("Region (2-letter country code)", prefs.region) {
                         prefs.region = it
                         initCatalog()
                     }
-                    7 -> {
+                    9 -> {
                         prefs.hiddenApps = emptySet()
                         loadApps()
                     }
-                    8 -> {
+                    10 -> {
                         cache.clear()
                         toast("Cache cleared")
                         initCatalog()
                     }
-                    9 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
+                    11 -> if (!Launch.start(this, Intent(Settings.ACTION_SETTINGS))) toast("Settings unavailable")
                 }
             }
             .show()
@@ -1297,6 +1730,8 @@ class MainActivity : ComponentActivity() {
         private const val MAX_LIST_ITEMS = 80
         private const val WEATHER_REFRESH_MS = 15 * 60_000L
         private const val QUOTE_INTERVAL_MS = 20_000L
+        /** How often the subscriptions row looks for new uploads while you come and go. */
+        private const val YOUTUBE_REFRESH_MS = 30 * 60_000L
         /** Anything on disk older than this is useless to every endpoint, so sweep it at startup. */
         private const val CACHE_MAX_AGE_MS = 14 * DiskCache.DAY
     }

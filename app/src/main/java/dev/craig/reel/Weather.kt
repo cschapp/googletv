@@ -65,7 +65,7 @@ object Weather {
         conn.connectTimeout = 8_000
         conn.readTimeout = 8_000
         conn.setRequestProperty("Accept", "application/json")
-        conn.setRequestProperty("User-Agent", "Reel/0.1 (Android TV)")
+        conn.setRequestProperty("User-Agent", "Reel/${BuildConfig.VERSION_NAME} (Android TV)")
         try {
             val code = conn.responseCode
             if (code !in 200..299) throw IOException("HTTP $code for $url")

@@ -18,11 +18,13 @@ android {
         applicationId = "dev.craig.reel"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "1.1"
         buildConfigField("String", "TMDB_KEY", "\"${localProps.getProperty("tmdb.key", "").trim()}\"")
         buildConfigField("String", "TRAKT_CLIENT_ID", "\"${localProps.getProperty("trakt.client_id", "").trim()}\"")
         buildConfigField("String", "TRAKT_CLIENT_SECRET", "\"${localProps.getProperty("trakt.client_secret", "").trim()}\"")
+        buildConfigField("String", "GOOGLE_CLIENT_ID", "\"${localProps.getProperty("google.client_id", "").trim()}\"")
+        buildConfigField("String", "GOOGLE_CLIENT_SECRET", "\"${localProps.getProperty("google.client_secret", "").trim()}\"")
     }
 
     buildFeatures {
