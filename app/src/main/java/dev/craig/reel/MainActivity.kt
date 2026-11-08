@@ -1048,14 +1048,85 @@ class MainActivity : ComponentActivity() {
             .sorted()
 
     private fun openOn(svc: InstalledService, t: Title, offers: List<Offer>) {
+        // Netflix never says which episode is on; ask, so Trakt gets the right one.
+        val trakt = trakt()?.takeIf { it.isLinked && prefs.traktScrobble && PlaybackWatcher.isEnabled(this) }
+        if (t.type == MediaType.TV && svc.pkg in Scrobbler.NO_TITLE_APPS && trakt != null) {
+            askEpisode(trakt, t.id, t.name, svc.label) { ep, track -> launchOn(svc, t, offers, ep, track) }
+        } else {
+            launchOn(svc, t, offers, null, true)
+        }
+    }
+
+    private fun launchOn(svc: InstalledService, t: Title, offers: List<Offer>, episode: Pair<Int, Int>?, track: Boolean) {
         if (!Launch.openTitle(this, svc, t.name, offers)) {
             toast("Couldn't open ${svc.label}")
             return
         }
         val firstEver = prefs.recentTitles.isEmpty()
         prefs.addRecentTitle(t, svc.label)
-        prefs.launchHint = LaunchHint(t.type, t.id, t.name, svc.pkg, System.currentTimeMillis())
+        prefs.launchHint = if (track) LaunchHint(t.type, t.id, t.name, svc.pkg, System.currentTimeMillis(), episode) else null
         if (firstEver) rebuildGenreChoices()
+    }
+
+    /**
+     * Which episode of [name] you're about to watch, for Trakt: the next one Trakt has you on, or
+     * one you pick by season. [done] gets the episode (null: let Reel guess) and whether to send
+     * it to Trakt at all. Backing out of the first list cancels.
+     */
+    private fun askEpisode(trakt: Trakt, tmdbId: Int, name: String, app: String, done: (Pair<Int, Int>?, Boolean) -> Unit) {
+        lifecycleScope.launch {
+            val found = try {
+                withContext(Dispatchers.IO) {
+                    val id = trakt.showId(tmdbId) ?: return@withContext null
+                    Triple(id, trakt.nextEpisode(id), trakt.seasons(id))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            if (found == null) return@launch done(null, true)
+            val (_, next, seasons) = found
+            val options = listOfNotNull(
+                next?.let { (ep, title) -> "S${ep.first} E${ep.second} · $title  (next on Trakt)" to { done(ep, true) } },
+                ("Pick the episode…" to { pickSeason(name, seasons) { done(it, true) } }).takeIf { seasons.isNotEmpty() },
+                "Don't send this to Trakt" to { done(null, false) },
+            )
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Which episode of $name?")
+                .setItems(options.map { it.first }.toTypedArray()) { _, which -> options[which].second() }
+                .show()
+        }
+    }
+
+    private fun pickSeason(name: String, seasons: List<Trakt.Season>, done: (Pair<Int, Int>) -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(name)
+            .setItems(seasons.map { "Season ${it.number}  (${it.episodes.size} episodes)" }.toTypedArray()) { _, which ->
+                val season = seasons[which]
+                AlertDialog.Builder(this)
+                    .setTitle("$name · Season ${season.number}")
+                    .setItems(season.episodes.map { (n, title) -> "E$n · $title" }.toTypedArray()) { _, e ->
+                        done(season.number to season.episodes[e].first)
+                    }
+                    .show()
+            }
+            .show()
+    }
+
+    /** Settings → Trakt: correct which episode Reel takes a Netflix show to be on. */
+    private fun changeEpisode(trakt: Trakt, hint: LaunchHint) {
+        askEpisode(trakt, hint.tmdbId, hint.name, hint.pkg) { ep, track ->
+            prefs.launchHint = if (track) hint.copy(episode = ep, at = System.currentTimeMillis()) else null
+            Scrobbler.current?.episodeChanged()
+            toast(
+                when {
+                    !track -> "Not sending ${hint.name} to Trakt"
+                    ep != null -> "Go back to it: Reel will send ${hint.name} S${ep.first} E${ep.second}"
+                    else -> "Go back to it: Reel will send the next episode on Trakt"
+                },
+            )
+        }
     }
 
     /** Long press on a poster: in the Recent row, offer to forget it. */
@@ -1547,7 +1618,16 @@ class MainActivity : ComponentActivity() {
             !listening -> "Send what I watch to Trakt: needs notification access"
             else -> "Send what I watch to Trakt: on"
         }
-        val actions = listOf(
+        // A show recently opened in Netflix: let you fix which episode Reel thinks it's on.
+        val hint = prefs.launchHint?.takeIf {
+            it.type == MediaType.TV && it.pkg in Scrobbler.NO_TITLE_APPS &&
+                System.currentTimeMillis() - it.at < 12 * 3600_000L
+        }
+        val actions = listOfNotNull(
+            hint?.let { h ->
+                val on = h.episode?.let { (s, e) -> "S$s E$e" } ?: "next on Trakt"
+                "Episode of ${h.name} in Netflix: $on (change)" to { changeEpisode(t, h) }
+            },
             scrobbleLabel to { explainScrobbling() },
             "Unlink Trakt (${prefs.traktUser.ifBlank { "linked" }})" to {
                 t.unlink()

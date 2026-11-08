@@ -104,11 +104,13 @@ adb shell am start -n dev.craig.reel/.MainActivity --es trakt_client_id YOUR_ID
 
 None of the streaming apps scrobble to Trakt on Google TV, so Reel does it. It reads what each app reports it's playing (the same notification access the YouTube row uses; see 3c for the adb command) and sends it to Trakt: after 3 minutes of play it's matched and shown as watching, and when you stop, anything 80% watched goes into your Trakt history. Anything less is saved as a paused position, which shows up in Continue watching. ⚙ → Trakt turns it on or off and shows the last thing it sent.
 
-What each app reports decides how well this works:
+What each app reports decides how well this works (all checked on the TV):
 
-- **Most apps** report the title, and for shows the season and episode. Reel matches that on Trakt.
-- **Prime Video** reports only its catalog id. Reel looks it up on primevideo.com. Prime reports no play position either, so progress is play time plus wherever Trakt last had it paused.
-- **Netflix** reports nothing but a play position. If you opened the title from Reel in the last 20 minutes, Reel assumes that's what is on; for a show, the next episode you haven't watched on Trakt, moving on when Netflix autoplays the next one. Anything you start from Netflix's own screens isn't seen. To fill those gaps, download your history at netflix.com → Account → Profile → Viewing activity → Download all, and import the CSV on Trakt.
+- **Pluto TV and Tubi** report the title and length, but no year; the length picks between same-named movies (Ghostbusters 1984, not 2016). For episodes they often give only the episode's name ("Pilot") or numbers ("S24:E01"); if you opened the show from Reel, Reel reads that as an episode of it, matched by name where it has one. Tubi's own show names ("Classic Doctor Who: The Seventh Doctor") don't always match Trakt's, so shows opened from Reel work best.
+- **Prime Video** reports only its catalog id. Reel looks it up on primevideo.com, which gives the movie, or the show and episode. Episodes are matched on Trakt by name first, because numbering differs: Prime's Columbo S1E1 is "Prescription: Murder", which Trakt files as a special (S0E1).
+- **Netflix** reports nothing but a play position, so it only works for what you open from Reel. For a show, Reel asks which episode you're about to watch, with the next one Trakt has you on first; choose another by season if Trakt doesn't know where you are. When an episode finishes, Reel moves on to the one after it, including when Netflix autoplays it. If the guess is wrong mid-episode, ⚙ → Trakt → *Episode of … in Netflix* fixes it. Netflix numbers some episodes differently (its Seinfeld S9E16 is the pilot), so pick by name. Anything you start from Netflix's own screens isn't seen; to fill those gaps, download your history at netflix.com → Account → Profile → Viewing activity → Download all, and import the CSV on Trakt.
+
+Home-screen previews, "up next" cards and anything under 3 minutes of play don't count. Apps that report stopped between an ad and the show, or move playback to a new session (Pluto), get a minute to carry on before the title counts as over.
 
 ## 3c. Link YouTube (optional)
 
@@ -167,4 +169,5 @@ When you're done with adb for the day, turn off Wireless debugging on the TV.
 - Title pages depend on JustWatch having a link for that app. When it doesn't (or JustWatch is down), Netflix, Tubi and YouTube get a search deep link; others get Android's standard search hand-off, or just open with a toast telling you what to search.
 - Niche genres depend on TMDB's community tagging. If a phrase finds nothing, try a variant ("post-apocalyptic future" vs "apocalypse").
 - Availability data is TMDB/JustWatch's and can lag a few days behind the services.
-- Scrobbling a Netflix show assumes you watch in order. If you skip ahead or rewatch an episode, Trakt gets the wrong one; fix it in your Trakt history.
+- Reel can't see which Netflix episode is on, only what you told it and that the next one followed. If you jump to another episode inside Netflix, change it in ⚙ → Trakt, or fix it in your Trakt history afterwards.
+- Apps that report no play position (Prime most of the time, Tubi until you pause or skip) are tracked by play time, so an opening ad counts and skipping ahead only counts once the app reports where you landed.

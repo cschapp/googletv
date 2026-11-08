@@ -12,36 +12,78 @@ import java.net.URL
 object AppTitles {
 
     /** A title an app's id stands for. [lengthMs] is 0 when the page doesn't say. */
-    data class Found(val title: String, val episode: Pair<Int, Int>?, val year: Int?, val lengthMs: Long)
+    data class Found(
+        val title: String,
+        val episode: Pair<Int, Int>?,
+        val year: Int?,
+        val lengthMs: Long,
+        /** The episode's own title, which matches Trakt better than numbers do (pilots filed as specials). */
+        val episodeTitle: String? = null,
+    )
 
-    fun lookup(mediaId: String): Found? =
-        if (mediaId.startsWith(PRIME_PREFIX)) prime(mediaId) else null
+    fun lookup(mediaId: String): Found? = when {
+        mediaId.startsWith(PRIME_PREFIX) -> prime(mediaId)
+        mediaId.startsWith(TUBI_PREFIX) -> tubi(mediaId.removePrefix(TUBI_PREFIX))
+        else -> null
+    }
 
+    /** An id [lookup] understands for what [pkg] reports as its playing item, if any. */
+    fun idFor(pkg: String, appItemId: Long, episode: Boolean): String? =
+        if (pkg == "com.tubitv" && appItemId > 0) "$TUBI_PREFIX${if (episode) "tv-shows" else "movies"}/$appItemId" else null
+
+    /**
+     * Tubi's player gives its content id as the playback state's active item, and for episodes
+     * no show name. tubitv.com/tv-shows/<id> (or /movies/<id>) names it in og:title.
+     */
+    private fun tubi(path: String): Found? {
+        val html = fetch("https://tubitv.com/$path") ?: return null
+        val raw = Regex("<meta property=\"og:title\" content=\"([^\"]+)\"").find(html)?.groupValues?.get(1) ?: return null
+        val og = unescape(raw)
+        Log.i(TAG, "tubi $path og:title “$og”")
+        val year = Regex("\\(((?:19|20)\\d\\d)\\)").find(og)?.groupValues?.get(1)?.toInt()
+        // "Hell's Kitchen S01:E01 - Day One" -> "Hell's Kitchen"; "The Crow (1994)" -> "The Crow".
+        val name = og.replace(Regex("^Watch\\s+", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*(-|\\|)\\s*(Free|Tubi).*$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*\\bS(?:eason)?\\s*\\d{1,2}\\s*[:.]?\\s*E(?:p(?:isode)?)?\\.?\\s*\\d{1,3}\\b.*$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*\\((?:19|20)\\d\\d\\)\\s*$"), "")
+            .trim(' ', '-', ':', '|')
+        if (name.isEmpty()) return null
+        return Found(name, null, year, 0L)
+    }
+
+    /**
+     * primevideo.com/detail/<gti>. A movie's page is its own; an episode's id lands on its season's
+     * page ("Prime Video: Columbo Season 1"), whose data has an entry keyed by that id with the
+     * episode's title and number.
+     */
     private fun prime(gti: String): Found? {
         val html = fetch("https://www.primevideo.com/detail/$gti") ?: return null
         val raw = Regex("<title>([^<]+)</title>").find(html)?.groupValues?.get(1) ?: return null
         var title = unescape(raw).removePrefix("Prime Video:").trim()
         if (title.isEmpty() || title.equals("Prime Video", ignoreCase = true)) return null
-        // The page's first entity, release year and duration are the title's own; related titles follow.
-        val entity = Regex("\"entityType\":\"([^\"]+)\"").find(html)?.groupValues?.get(1).orEmpty()
-        val year = Regex("\"releaseYear\":(\\d{4})").find(html)?.groupValues?.get(1)?.toInt()
-        val lengthMs = (Regex("\"duration\":(\\d+)").find(html)?.groupValues?.get(1)?.toLong() ?: 0L) * 1000
-        var episode: Pair<Int, Int>? = null
-        if (!entity.equals("Movie", ignoreCase = true)) {
-            // Series pages are titled "Show: Season 2"; the episode is the one listed with this id.
-            val season = Regex(":\\s*Season\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE).find(title)
-            title = title.replace(Regex(":\\s*Season\\s+\\d+\\s*$", RegexOption.IGNORE_CASE), "").trim()
-            val at = html.indexOf("\"gti\":\"$gti\"").takeIf { it >= 0 }
-            val near = at?.let { html.substring((it - 1500).coerceAtLeast(0), (it + 1500).coerceAtMost(html.length)) }
-            val ep = near?.let { Regex("\"episodeNumber\":(\\d+)").find(it)?.groupValues?.get(1)?.toInt() }
-            val sn = near?.let { Regex("\"seasonNumber\":(\\d+)").find(it)?.groupValues?.get(1)?.toInt() }
-                ?: season?.groupValues?.get(1)?.toInt()
-            if (ep != null && sn != null) episode = sn to ep
-            Log.i(TAG, "prime $gti is a $entity: “$title” season $sn episode $ep")
-            // A show with no episode we can name can't be scrobbled.
-            if (episode == null) return null
+        // This id's own entry, if the page has one; else the page's first values are the title's.
+        // Several maps are keyed by the id; the detail one starts with its title.
+        val block = (html.indexOf("\"$gti\":{\"title\":").takeIf { it >= 0 } ?: html.indexOf("\"$gti\":{").takeIf { it >= 0 })
+            ?.let { html.substring(it, (it + 4000).coerceAtMost(html.length)) }
+        fun field(name: String, src: String = block ?: html) =
+            Regex("\"$name\":\"?([^\",}]+)").find(src)?.groupValues?.get(1)
+        val titleType = block?.let { field("titleType", it) }.orEmpty()
+        val entity = field("entityType").orEmpty()
+        val year = field("releaseYear")?.toIntOrNull()
+        val lengthMs = (field("duration")?.toLongOrNull() ?: 0L) * 1000
+        if (titleType.equals("movie", true) || (titleType.isEmpty() && entity.equals("Movie", true))) {
+            return Found(title, null, year, lengthMs)
         }
-        return Found(title, episode, year, if (episode == null) lengthMs else 0L)
+        // "Columbo Season 1" or "Severance: Season 2".
+        val seasonRe = Regex("[:\\s]+Season\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
+        val season = seasonRe.find(title)?.groupValues?.get(1)?.toInt() ?: field("seasonNumber", html)?.toIntOrNull()
+        title = title.replace(seasonRe, "").trim()
+        val ep = block?.let { field("episodeNumber", it) }?.toIntOrNull()
+        val epTitle = block?.let { Regex("^\"[^\"]+\":\\{\"title\":\"([^\"]+)\"").find(it)?.groupValues?.get(1) }?.let(::unescape)
+        Log.i(TAG, "prime $gti is a $titleType of “$title”: season $season episode $ep “$epTitle”")
+        // A show with no episode we can name can't be scrobbled.
+        if (season == null || ep == null) return null
+        return Found(title, season to ep, null, lengthMs, epTitle)
     }
 
     private fun fetch(url: String): String? = runCatching {
@@ -63,5 +105,6 @@ object AppTitles {
         .replace("&lt;", "<").replace("&gt;", ">")
 
     const val PRIME_PREFIX = "amzn1.dv.gti."
+    private const val TUBI_PREFIX = "tubi:"
     private const val TAG = "Reel"
 }

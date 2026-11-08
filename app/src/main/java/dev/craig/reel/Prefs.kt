@@ -167,11 +167,16 @@ class Prefs(ctx: Context) {
             val parts = (sp.getString("launch_hint", null) ?: return null).split('\t')
             if (parts.size < 5) return null
             val type = if (parts[0] == MediaType.TV.path) MediaType.TV else MediaType.MOVIE
-            return LaunchHint(type, parts[1].toIntOrNull() ?: return null, parts[2], parts[3], parts[4].toLongOrNull() ?: 0L)
+            val ep = parts.getOrNull(5)?.split('x')?.takeIf { it.size == 2 }
+                ?.let { (s, e) -> (s.toIntOrNull() ?: return@let null) to (e.toIntOrNull() ?: return@let null) }
+            return LaunchHint(type, parts[1].toIntOrNull() ?: return null, parts[2], parts[3], parts[4].toLongOrNull() ?: 0L, ep)
         }
         set(v) = sp.edit().putString(
             "launch_hint",
-            v?.let { listOf(it.type.path, it.tmdbId, it.name.replace('\t', ' '), it.pkg, it.at).joinToString("\t") },
+            v?.let {
+                listOf(it.type.path, it.tmdbId, it.name.replace('\t', ' '), it.pkg, it.at, it.episode?.let { (s, e) -> "${s}x$e" } ?: "")
+                    .joinToString("\t")
+            },
         ).apply()
 
     /** The last thing the scrobbler did, with when, for the settings screen. */
@@ -289,8 +294,18 @@ enum class ThumbSize(val label: String, val widthDp: Int) {
 /** A title you opened from Reel, and which app it went to. */
 data class RecentTitle(val title: Title, val app: String, val at: Long)
 
-/** Reel opened [tmdbId] in [pkg] at [at]. */
-data class LaunchHint(val type: MediaType, val tmdbId: Int, val name: String, val pkg: String, val at: Long)
+/**
+ * Reel opened [tmdbId] in [pkg] at [at]. For a show in an app that doesn't say which episode is on,
+ * [episode] is (season, number) of the one you said you're watching, moved on as you finish each.
+ */
+data class LaunchHint(
+    val type: MediaType,
+    val tmdbId: Int,
+    val name: String,
+    val pkg: String,
+    val at: Long,
+    val episode: Pair<Int, Int>? = null,
+)
 
 /** How discover-based rows are ordered. */
 enum class Sort(val label: String) {

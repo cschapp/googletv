@@ -207,7 +207,13 @@ class Trakt(private val clientId: String, private val clientSecret: String, priv
      * Prefers an exact title match, then [year], then (for a movie) the runtime closest to the
      * app's [lengthMs] (two "Ghostbusters" differ by 11 minutes), then Trakt's own ranking.
      */
-    fun findForScrobble(title: String, episode: Pair<Int, Int>?, year: Int? = null, lengthMs: Long = 0L): ScrobbleTarget? {
+    fun findForScrobble(
+        title: String,
+        episode: Pair<Int, Int>?,
+        year: Int? = null,
+        lengthMs: Long = 0L,
+        episodeTitle: String? = null,
+    ): ScrobbleTarget? {
         val kind = if (episode != null) "show" else "movie"
         val arr = callArray("GET", "/search/$kind?query=${java.net.URLEncoder.encode(title, "UTF-8")}&extended=full&limit=10")
         val hits = (0 until arr.length()).mapNotNull { arr.getJSONObject(it).optJSONObject(kind) }
@@ -225,26 +231,73 @@ class Trakt(private val clientId: String, private val clientSecret: String, priv
         val traktId = pick.traktId() ?: return null
         val name = pick.optString("title")
         if (episode == null) return ScrobbleTarget(traktId, name, null, pick.optInt("runtime") * 60_000L)
-        return ScrobbleTarget(traktId, name, episode, episodeRuntimeMs(traktId, episode) ?: (pick.optInt("runtime") * 60_000L))
+        // Numbering differs between apps and Trakt (Columbo's pilots are Trakt specials); a title match wins.
+        val ep = episodeTitle?.let { t -> episodeNamed(traktId, t) } ?: episode
+        return ScrobbleTarget(traktId, name, ep, episodeRuntimeMs(traktId, ep) ?: (pick.optInt("runtime") * 60_000L))
     }
 
     /**
-     * A title Reel opened, by its TMDB id. For a show that's the next episode you haven't watched,
-     * since the apps that need this (Netflix) don't say which episode is on. Null for a show
-     * you've watched all of.
+     * A title Reel opened, by its TMDB id. For a show that's [episode] when you said which one
+     * you're on, else the next episode you haven't watched, since the apps that need this
+     * (Netflix) don't say which episode is on. Null for a show you've watched all of.
      */
-    fun findByTmdb(type: MediaType, tmdbId: Int): ScrobbleTarget? {
-        val kind = if (type == MediaType.MOVIE) "movie" else "show"
-        val arr = callArray("GET", "/search/tmdb/$tmdbId?type=$kind&extended=full")
-        val o = (0 until arr.length()).map { arr.getJSONObject(it) }
-            .firstOrNull { it.optString("type") == kind }?.optJSONObject(kind) ?: return null
+    fun findByTmdb(type: MediaType, tmdbId: Int, episode: Pair<Int, Int>? = null, episodeTitle: String? = null): ScrobbleTarget? {
+        val o = byTmdb(type, tmdbId) ?: return null
         val traktId = o.traktId() ?: return null
         val name = o.optString("title")
         if (type == MediaType.MOVIE) return ScrobbleTarget(traktId, name, null, o.optInt("runtime") * 60_000L)
-        val next = call("GET", "/shows/$traktId/progress/watched?hidden=false&specials=false&count_specials=false")
-            .body.optJSONObject("next_episode") ?: return null
-        val ep = next.optInt("season") to next.optInt("number")
+        // A name that isn't one of this show's episodes means it isn't this show: send nothing.
+        val named = episodeTitle?.let { episodeNamed(traktId, it) ?: if (episode == null) return null else null }
+        val ep = named ?: episode ?: nextEpisode(traktId)?.first ?: return null
         return ScrobbleTarget(traktId, name, ep, episodeRuntimeMs(traktId, ep) ?: (o.optInt("runtime") * 60_000L))
+    }
+
+    /** A show's Trakt id from its TMDB id. */
+    fun showId(tmdbId: Int): Int? = byTmdb(MediaType.TV, tmdbId)?.traktId()
+
+    private fun byTmdb(type: MediaType, tmdbId: Int): JSONObject? {
+        val kind = if (type == MediaType.MOVIE) "movie" else "show"
+        val arr = callArray("GET", "/search/tmdb/$tmdbId?type=$kind&extended=full")
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+            .firstOrNull { it.optString("type") == kind }?.optJSONObject(kind)
+    }
+
+    /** The next episode Trakt has you on, with its title. */
+    fun nextEpisode(showId: Int): Pair<Pair<Int, Int>, String>? {
+        val next = call("GET", "/shows/$showId/progress/watched?hidden=false&specials=false&count_specials=false")
+            .body.optJSONObject("next_episode") ?: return null
+        return (next.optInt("season") to next.optInt("number")) to next.optString("title")
+    }
+
+    /** One season's episodes, as (number, title). */
+    data class Season(val number: Int, val episodes: List<Pair<Int, String>>)
+
+    /** Every regular season with its episodes; with [specials], season 0 too. */
+    fun seasons(showId: Int, specials: Boolean = false): List<Season> {
+        val arr = callArray("GET", "/shows/$showId/seasons?extended=episodes")
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+            .filter { specials || it.optInt("number") > 0 }
+            .map { s ->
+                val eps = s.optJSONArray("episodes") ?: JSONArray()
+                Season(s.optInt("number"), (0 until eps.length()).map { eps.getJSONObject(it) }.map { it.optInt("number") to it.optString("title") })
+            }
+            .filter { it.episodes.isNotEmpty() }
+    }
+
+    /** The episode titled [title], specials included, as (season, number). */
+    fun episodeNamed(showId: Int, title: String): Pair<Int, Int>? {
+        val want = Tmdb.normalize(title)
+        for (s in seasons(showId, specials = true)) {
+            s.episodes.firstOrNull { Tmdb.normalize(it.second) == want }?.let { return s.number to it.first }
+        }
+        return null
+    }
+
+    /** The episode after [ep]: the next in its season, else the first of the next season. Null after the last. */
+    fun episodeAfter(showId: Int, ep: Pair<Int, Int>): Pair<Int, Int>? {
+        val all = seasons(showId).flatMap { s -> s.episodes.map { s.number to it.first } }
+        val i = all.indexOf(ep)
+        return if (i >= 0) all.getOrNull(i + 1) else null
     }
 
     /** Where Trakt has this paused, in percent; 0 if it isn't. */

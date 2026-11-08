@@ -28,6 +28,9 @@ class ScrobblerParseTest {
 
     @Test fun nothing() = assertNull(parse())
 
+    @Test fun episodeWithNoShowName() =
+        assertEquals(Scrobbler.Parsed(null, 1 to 1, null), parse("S01:E01 - Day One"))
+
     @Test fun appNameIsNotATitle() = assertNull(parse("PrimeVideo"))
 
     @Test fun primeGivesOnlyItsId() {

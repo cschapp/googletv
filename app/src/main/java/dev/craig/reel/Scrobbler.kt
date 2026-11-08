@@ -69,10 +69,12 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
     }
 
     init {
+        current = this
         scope.launch { for (job in queue) runCatching { job() }.onFailure { Log.w(TAG, "trakt scrobble failed", it) } }
     }
 
     fun close() {
+        if (current === this) current = null
         for (s in watching.keys.toList()) gone(s)
         for (item in parked.values.toList()) finish(item)
         parked.clear()
@@ -80,6 +82,20 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         queue.close()
         // Let the queued stops go out before the scope dies with the service.
         main.postDelayed({ scope.cancel() }, 10_000)
+    }
+
+    /**
+     * You changed which episode of a Reel-opened show is on. Drop what we were following without
+     * telling Trakt it stopped (that would save the wrong episode); the next play starts afresh,
+     * and its start replaces the wrong one on Trakt.
+     */
+    fun episodeChanged() = main.post {
+        for ((s, item) in items.toList()) if (item.what.launched != null) {
+            item.ending?.let { main.removeCallbacks(it) }
+            items.remove(s)
+            Log.i(TAG, "dropped ${item.target?.label ?: item.what.label}; you picked another episode")
+        }
+        parked.entries.removeAll { (_, item) -> item.what.launched != null && run { item.ending?.let { main.removeCallbacks(it) }; true } }
     }
 
     /** The full list of active sessions; we keep the streaming apps' ones. */
@@ -139,7 +155,8 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
     // ---------- Following playback ----------
 
     /** One title playing in one app. [playedMs] counts wall-clock play time; [since] is set while playing. */
-    private class Item(val what: Parsed, val durationMs: Long) {
+    private class Item(val pkg: String, val what: Parsed, val durationMs: Long, var armed: Boolean = false) {
+        val createdAt = SystemClock.elapsedRealtime()
         var since: Long? = null
         var playedMs = 0L
         /** Last play position the app reported, extrapolated to now. -1 when it doesn't report one. */
@@ -154,12 +171,14 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         /** Pending end of this title after the app said it stopped; cancelled if it plays again. */
         var ending: Runnable? = null
         var lastState = -1
+        /** The app's id for what's playing, from its playback state (Tubi's content id). */
+        @Volatile var appItemId = -1L
     }
 
     private fun onMedia(s: SessionKey, md: MediaMetadata?, state: PlaybackState?) {
         // Ad breaks come with their own metadata; they're part of the title around them.
         if (md != null && runCatching { md.getLong(KEY_ADVERTISEMENT) }.getOrDefault(0L) == 1L) return onState(s, state)
-        val what = md?.let { parse(it) }
+        val what = md?.let { parse(it) }?.let { withHint(s.controller.packageName, it) }
         val old = items[s]
         // No metadata at all mid-play (Pluto after buffering, Netflix always) is the same title.
         // Metadata with the fields emptied (Prime when you leave the player) means it ended.
@@ -167,7 +186,7 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         if (md != null) Log.i(TAG, "${s.controller.packageName} metadata: ${dump(md)} -> ${what ?: "not a title"}")
         old?.let { finish(it) }
         items.remove(s)
-        if (what != null) items[s] = adopt(s, what) ?: Item(what, md!!.getLong(MediaMetadata.METADATA_KEY_DURATION))
+        if (what != null) items[s] = adopt(s, what) ?: Item(s.controller.packageName, what, md!!.getLong(MediaMetadata.METADATA_KEY_DURATION))
         onState(s, state)
     }
 
@@ -176,8 +195,12 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
             ?: adopt(s, s.controller.metadata?.let { parse(it) })?.also { items[s] = it }
             ?: hintItem(s, state)?.also { items[s] = it }
             ?: return
-        update(item, state)
         val code = state?.state ?: PlaybackState.STATE_NONE
+        if (!item.armed && isLive(item, state, code)) {
+            item.armed = true
+            Log.i(TAG, "${s.controller.packageName} ${item.what.label} is really playing")
+        }
+        update(item, state)
         if (code != item.lastState) {
             Log.i(TAG, "${s.controller.packageName} ${item.what.label}: state $code at ${(state?.position ?: 0) / 1000}s, played ${item.playedMs / 1000}s")
             item.lastState = code
@@ -188,6 +211,7 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         }
         when (state?.state) {
             PlaybackState.STATE_PLAYING -> {
+                if (!item.armed) return
                 if (item.since == null) {
                     item.since = SystemClock.elapsedRealtime()
                     main.removeCallbacks(tick)
@@ -229,11 +253,36 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
     private fun hintItem(s: SessionKey, state: PlaybackState?): Item? {
         if (state?.state != PlaybackState.STATE_PLAYING) return null
         if (s.controller.metadata?.let { parse(it) } != null) return null
-        val hint = prefs.launchHint?.takeIf { it.pkg == s.controller.packageName } ?: return null
-        val lastActive = maxOf(hint.at, hintActive.takeIf { it.first == hint.at }?.second ?: 0L)
-        if (System.currentTimeMillis() - lastActive > HINT_TTL_MS) return null
+        val hint = liveHint(s.controller.packageName) ?: return null
         Log.i(TAG, "${hint.pkg} says nothing about what's on; taking it to be “${hint.name}”, opened from Reel")
-        return Item(Parsed(null, null, null, launched = hint), 0L)
+        return Item(hint.pkg, Parsed(null, null, null, launched = hint), 0L, armed = true)
+    }
+
+    /** What Reel opened in [pkg], if recently, or if something has kept playing in it since. */
+    private fun liveHint(pkg: String): LaunchHint? {
+        val hint = prefs.launchHint?.takeIf { it.pkg == pkg } ?: return null
+        val lastActive = maxOf(hint.at, hintActive.takeIf { it.first == hint.at }?.second ?: 0L)
+        return hint.takeIf { System.currentTimeMillis() - lastActive <= HINT_TTL_MS }
+    }
+
+    /**
+     * Some apps name only the episode of a show Reel just opened: Pluto says "Pilot" for The 100,
+     * Tubi says "S01:E01 - Day One". Read those as that show's episode. A title naming some
+     * other show is left alone.
+     */
+    private fun withHint(pkg: String, p: Parsed): Parsed {
+        if (p.launched != null || (p.title == null && p.episode == null)) return p
+        val hint = liveHint(pkg)?.takeIf { it.type == MediaType.TV } ?: return p
+        val show = Tmdb.normalize(hint.name)
+        val named = p.fields.any { Tmdb.normalize(it) == show } || p.title?.let(Tmdb::normalize) == show
+        if (p.title != null && p.episode != null && !named) return p
+        val episodeTitle = if (p.episode != null) null else {
+            p.fields.firstOrNull { Tmdb.normalize(it) != show && EPISODE.none { r -> r.containsMatchIn(it) } }
+        }
+        return Parsed(hint.name, p.episode, null, launched = hint, episodeTitle = episodeTitle).also {
+            it.fields = p.fields
+            Log.i(TAG, "$pkg: reading ${p.label} as ${it.label}, opened from Reel")
+        }
     }
 
     /**
@@ -251,8 +300,22 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         return true
     }
 
-    /** Books play time up to now and refreshes the position from [state]. */
+    /**
+     * Whether [state] shows [item] actually playing, rather than a state left over from the title
+     * before. Tubi's home screen puts "up next" metadata on a session still saying PLAYING at the
+     * last movie's position; that mustn't count. Playing counts once the state moves into
+     * PLAYING after we have the title, or the app reports a position since then.
+     */
+    private fun isLive(item: Item, state: PlaybackState?, code: Int): Boolean {
+        if (code != PlaybackState.STATE_PLAYING || state == null) return false
+        if (item.lastState != -1 && item.lastState != PlaybackState.STATE_PLAYING) return true
+        return state.lastPositionUpdateTime >= item.createdAt - FRESH_MS
+    }
+
+    /** Books play time up to now and refreshes the position from [state]. Nothing counts until [Item.armed]. */
     private fun update(item: Item, state: PlaybackState?) {
+        state?.activeQueueItemId?.takeIf { it > 0 }?.let { item.appItemId = it }
+        if (!item.armed) return
         val now = SystemClock.elapsedRealtime()
         item.since?.let {
             item.playedMs += now - it
@@ -298,7 +361,7 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         val playedMs = item.playedMs
         queue.trySend {
             val trakt = trakt() ?: return@trySend
-            val target = item.target ?: resolve(trakt, item.what, item.durationMs)?.also { item.target = it }
+            val target = item.target ?: resolve(trakt, item.what, item.durationMs, item.pkg, item.appItemId)?.also { item.target = it }
             if (target == null) {
                 if (action == ScrobbleAction.START) note("Couldn't find “${item.what.label}” on Trakt")
                 return@trySend
@@ -315,6 +378,7 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
             val code = trakt.scrobble(action, target, progress)
             val pct = "%.0f%%".format(progress)
             Log.i(TAG, "trakt ${action.path} ${target.label} at $pct: $code")
+            if (action == ScrobbleAction.STOP && progress >= WATCHED_PERCENT && code in 200..299) item.what.launched?.let { moveOn(trakt, it, target) }
             when {
                 code == 409 -> Unit // Trakt already has it from a moment ago
                 code !in 200..299 -> note("Trakt said $code to “${target.label}”")
@@ -325,21 +389,42 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         }
     }
 
-    private fun resolve(trakt: Trakt, what: Parsed, lengthHint: Long = 0L): ScrobbleTarget? {
+    private fun resolve(trakt: Trakt, what: Parsed, lengthHint: Long, pkg: String, appItemId: Long): ScrobbleTarget? {
         // Which episode a Reel-opened show is on changes as you watch, so that one isn't cached.
-        what.launched?.let { return trakt.findByTmdb(it.type, it.tmdbId) }
+        what.launched?.let { launched ->
+            // The app said which episode, by number or name: that, and nothing else if the name isn't found.
+            if (what.episode != null || what.episodeTitle != null) {
+                return trakt.findByTmdb(launched.type, launched.tmdbId, what.episode, what.episodeTitle)
+            }
+            // The episode may have moved on (or been picked in settings) since this item began.
+            val hint = prefs.launchHint?.takeIf { it.at == launched.at && it.tmdbId == launched.tmdbId } ?: launched
+            val t = trakt.findByTmdb(hint.type, hint.tmdbId, hint.episode)
+            // Remember the guess, so everything after it follows on from this episode.
+            if (t?.episode != null && hint.episode == null && prefs.launchHint == hint) prefs.launchHint = hint.copy(episode = t.episode)
+            return t
+        }
         if (resolved.containsKey(what.key)) return resolved[what.key]
+        val id = what.mediaId ?: AppTitles.idFor(pkg, appItemId, what.episode != null)
         val t = if (what.title != null) {
             trakt.findForScrobble(what.title, what.episode, what.year, lengthHint)
         } else {
-            what.mediaId?.let { AppTitles.lookup(it) }?.let { found ->
-                Log.i(TAG, "${what.mediaId} is $found")
-                trakt.findForScrobble(found.title, found.episode, found.year)
+            id?.let { AppTitles.lookup(it) }?.let { found ->
+                Log.i(TAG, "$id is $found")
+                trakt.findForScrobble(found.title, found.episode ?: what.episode, found.year, lengthHint.takeIf { it > 0 } ?: found.lengthMs, found.episodeTitle)
                     ?.let { if (found.lengthMs > 0) it.copy(runtimeMs = found.lengthMs) else it }
             }
         }
         resolved[what.key] = t
         return t
+    }
+
+    /** A Reel-opened show's episode is done: the next one is on next, whatever Trakt's history says. */
+    private fun moveOn(trakt: Trakt, launched: LaunchHint, target: ScrobbleTarget) {
+        val ep = target.episode ?: return
+        val hint = prefs.launchHint?.takeIf { it.at == launched.at && it.tmdbId == launched.tmdbId } ?: return
+        val after = trakt.episodeAfter(target.traktId, ep) ?: return
+        prefs.launchHint = hint.copy(episode = after)
+        Log.i(TAG, "${hint.name}: next up S${after.first} E${after.second}")
     }
 
     private fun trakt(): Trakt? {
@@ -365,16 +450,29 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         val year: Int?,
         val mediaId: String? = null,
         val launched: LaunchHint? = null,
+        /** The episode's own name, when the app gave that instead of numbers (Pluto's "Pilot"). */
+        val episodeTitle: String? = null,
     ) {
+        /** Every text field the app gave, brand names left out; not part of equality. */
+        var fields: List<String> = emptyList()
+
         val key get() = when {
-            launched != null -> "reel|${launched.type.path}|${launched.tmdbId}"
+            launched != null -> "reel|${launched.type.path}|${launched.tmdbId}|${episode?.first}|${episode?.second}|${episodeTitle?.let(Tmdb::normalize)}"
             title != null -> "${Tmdb.normalize(title)}|${episode?.first}|${episode?.second}"
-            else -> "id|$mediaId"
+            else -> "id|$mediaId|${episode?.first}|${episode?.second}"
         }
-        val label get() = title ?: launched?.name ?: mediaId ?: "?"
+        val label get() = (title ?: launched?.name ?: mediaId ?: "?") +
+            (if (title == null && episode != null) " S${episode.first} E${episode.second}" else "") +
+            (episodeTitle?.let { " “$it”" } ?: "")
     }
 
     companion object {
+        /** The running one, if notification access is on, for settings to poke. */
+        @Volatile var current: Scrobbler? = null
+
+        /** Apps whose sessions name nothing, so the episode comes from what Reel opened. */
+        val NO_TITLE_APPS = setOf("com.netflix.ninja")
+
         private const val TAG = "Reel"
         private const val TICK_MS = 30_000L
         /** Play this long before it counts: skips trailers, previews and channel-surfing. */
@@ -385,6 +483,8 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
         private const val HINT_TTL_MS = 20 * 60_000L
         /** A jump back this big in a Reel-opened title means the next one started. */
         private const val ROLLOVER_MS = 5 * 60_000L
+        /** A position update this close to when we got the title belongs to it. */
+        private const val FRESH_MS = 2_000L
         /** How long after an app says it stopped before we believe it. */
         private const val END_GRACE_MS = 60_000L
         const val WATCHED_PERCENT = 80.0
@@ -414,12 +514,12 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
             MediaMetadata.METADATA_KEY_ALBUM_ARTIST,
             MediaMetadata.METADATA_KEY_ALBUM,
             MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE,
-            MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION,
             MediaMetadata.METADATA_KEY_WRITER,
         )
 
         private fun texts(md: MediaMetadata): List<String> =
-            (TEXT_KEYS.map { md.getString(it) } + listOf(md.description?.title, md.description?.subtitle, md.description?.description).map { it?.toString() })
+            // Not the description fields: those hold the plot, never a name.
+            (TEXT_KEYS.map { md.getString(it) } + listOf(md.description?.title, md.description?.subtitle).map { it?.toString() })
                 .mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }
                 .distinct()
 
@@ -443,12 +543,12 @@ class Scrobbler(private val prefs: Prefs, private val main: Handler) {
                 val before = f.substring(0, m.range.first).trim { it in SEPARATORS }
                 val show = before.takeIf { it.isNotEmpty() }
                     ?: fields.firstOrNull { other -> other != f && EPISODE.none { it.containsMatchIn(other) } }
-                    ?: return null
-                return Parsed(show, episode, null)
+                // Tubi names the episode ("S01:E01 - Day One") but not the show; that comes from its id.
+                return Parsed(show, episode, null, mediaId = mediaId).also { it.fields = fields }
             }
             val title = fields.first()
             val year = YEAR.find(title)?.groupValues?.get(1)?.toInt()
-            return Parsed(title.replace(YEAR, "").trim(), null, year)
+            return Parsed(title.replace(YEAR, "").trim(), null, year).also { it.fields = fields }
         }
 
         private fun dump(md: MediaMetadata): String =

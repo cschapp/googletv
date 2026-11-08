@@ -6,11 +6,16 @@ The version shows in Reel's ⚙ settings title. Newest first.
 
 ### Added
 
-- **Send what you watch to Trakt**: what Netflix, Prime Video, Disney+, Max and the other streaming apps play goes into your Trakt history (80% or more) or Continue watching (less). Uses the same notification access as YouTube watch tracking. Prime Video titles are looked up by their catalog id; Netflix reports no title, so it only works for titles opened from Reel. ⚙ → Trakt turns it on or off and shows the last thing sent.
+- **Send what you watch to Trakt**: what Netflix, Prime Video, Pluto TV, Tubi and the other streaming apps play goes into your Trakt history (80% or more) or Continue watching (less). Uses the same notification access as YouTube watch tracking. ⚙ → Trakt turns it on or off and shows the last thing sent.
+  - Prime Video titles are looked up by their catalog id on primevideo.com; episodes are matched on Trakt by name, since Prime and Trakt number some differently.
+  - When an app names only the episode ("Pilot", "S24:E01") of a show you opened from Reel, it's read as that show's episode.
+  - Netflix reports no title, so it only works for titles opened from Reel. For a show, Reel asks which episode you're about to watch (Trakt's next one first, or pick by season), then follows on episode by episode. ⚙ → Trakt → *Episode of … in Netflix* corrects it mid-episode.
+  - Previews, "up next" cards on Tubi's home screen, plot descriptions and anything under 3 minutes of play don't count.
 
 ### Changed
 
-- ⚙ → Trakt opens a small menu (sending to Trakt, unlink) once linked, instead of unlinking straight away.
+- ⚙ → Trakt opens a small menu (Netflix episode, sending to Trakt, unlink) once linked, instead of unlinking straight away.
+- Opening a show in Netflix asks which episode first, when sending to Trakt is on.
 
 ## 1.1 — 2026-10-31
 
