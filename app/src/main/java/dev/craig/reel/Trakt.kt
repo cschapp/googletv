@@ -30,8 +30,15 @@ data class DeviceCode(
 /** A title from a Trakt list, as TMDB knows it. [note] is a short line for the card, e.g. "Next: S2 E5". */
 data class TraktItem(val type: MediaType, val tmdbId: Int, val note: String? = null)
 
+/** A movie, or one episode of a show, matched on Trakt for scrobbling. [runtimeMs] is 0 when Trakt doesn't know it. */
+data class ScrobbleTarget(val traktId: Int, val title: String, val episode: Pair<Int, Int>?, val runtimeMs: Long) {
+    val label get() = episode?.let { "$title S${it.first} E${it.second}" } ?: title
+}
+
+enum class ScrobbleAction(val path: String) { START("start"), PAUSE("pause"), STOP("stop") }
+
 /**
- * Minimal Trakt client: device-code login, watchlist and recommendations.
+ * Minimal Trakt client: device-code login, watchlist and recommendations, and scrobbling.
  * Needs the client id of a Trakt app (trakt.tv/oauth/applications). Apps created since
  * October 2026 get no client secret (PKCE-only); the device flow works with the id alone,
  * so [clientSecret] is optional and only sent when present.
@@ -191,6 +198,93 @@ class Trakt(private val clientId: String, private val clientSecret: String, priv
                 }
             }
         }.awaitAll().filterNotNull()
+    }
+
+    // ---------- Scrobbling ----------
+
+    /**
+     * Finds what a streaming app says it's playing. [episode] is (season, number) for a show.
+     * Prefers an exact title match, then [year], then (for a movie) the runtime closest to the
+     * app's [lengthMs] (two "Ghostbusters" differ by 11 minutes), then Trakt's own ranking.
+     */
+    fun findForScrobble(title: String, episode: Pair<Int, Int>?, year: Int? = null, lengthMs: Long = 0L): ScrobbleTarget? {
+        val kind = if (episode != null) "show" else "movie"
+        val arr = callArray("GET", "/search/$kind?query=${java.net.URLEncoder.encode(title, "UTF-8")}&extended=full&limit=10")
+        val hits = (0 until arr.length()).mapNotNull { arr.getJSONObject(it).optJSONObject(kind) }
+        if (hits.isEmpty()) return null
+        val want = Tmdb.normalize(title)
+        val exact = hits.filter { Tmdb.normalize(it.optString("title")) == want }
+        val byLength = if (episode == null && lengthMs > 0 && exact.size > 1) {
+            exact.filter { it.optInt("runtime") > 0 }.minByOrNull { kotlin.math.abs(it.optInt("runtime") * 60_000L - lengthMs) }
+        } else null
+        val pick = exact.firstOrNull { year != null && it.optInt("year") == year }
+            ?: byLength
+            ?: exact.firstOrNull()
+            ?: hits.firstOrNull { year != null && it.optInt("year") == year }
+            ?: hits.first()
+        val traktId = pick.traktId() ?: return null
+        val name = pick.optString("title")
+        if (episode == null) return ScrobbleTarget(traktId, name, null, pick.optInt("runtime") * 60_000L)
+        return ScrobbleTarget(traktId, name, episode, episodeRuntimeMs(traktId, episode) ?: (pick.optInt("runtime") * 60_000L))
+    }
+
+    /**
+     * A title Reel opened, by its TMDB id. For a show that's the next episode you haven't watched,
+     * since the apps that need this (Netflix) don't say which episode is on. Null for a show
+     * you've watched all of.
+     */
+    fun findByTmdb(type: MediaType, tmdbId: Int): ScrobbleTarget? {
+        val kind = if (type == MediaType.MOVIE) "movie" else "show"
+        val arr = callArray("GET", "/search/tmdb/$tmdbId?type=$kind&extended=full")
+        val o = (0 until arr.length()).map { arr.getJSONObject(it) }
+            .firstOrNull { it.optString("type") == kind }?.optJSONObject(kind) ?: return null
+        val traktId = o.traktId() ?: return null
+        val name = o.optString("title")
+        if (type == MediaType.MOVIE) return ScrobbleTarget(traktId, name, null, o.optInt("runtime") * 60_000L)
+        val next = call("GET", "/shows/$traktId/progress/watched?hidden=false&specials=false&count_specials=false")
+            .body.optJSONObject("next_episode") ?: return null
+        val ep = next.optInt("season") to next.optInt("number")
+        return ScrobbleTarget(traktId, name, ep, episodeRuntimeMs(traktId, ep) ?: (o.optInt("runtime") * 60_000L))
+    }
+
+    /** Where Trakt has this paused, in percent; 0 if it isn't. */
+    fun pausedProgress(t: ScrobbleTarget): Double {
+        val arr = callArray("GET", if (t.episode == null) "/sync/playback/movies" else "/sync/playback/episodes")
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val match = if (t.episode == null) {
+                o.optJSONObject("movie")?.traktId() == t.traktId
+            } else {
+                val ep = o.optJSONObject("episode")
+                o.optJSONObject("show")?.traktId() == t.traktId &&
+                    ep?.optInt("season") == t.episode.first && ep.optInt("number") == t.episode.second
+            }
+            if (match) return o.optDouble("progress", 0.0)
+        }
+        return 0.0
+    }
+
+    private fun episodeRuntimeMs(showId: Int, ep: Pair<Int, Int>): Long? = runCatching {
+        call("GET", "/shows/$showId/seasons/${ep.first}/episodes/${ep.second}?extended=full").body.optInt("runtime")
+    }.getOrDefault(0).takeIf { it > 0 }?.let { it * 60_000L }
+
+    private fun JSONObject.traktId(): Int? = optJSONObject("ids")?.optInt("trakt", 0)?.takeIf { it > 0 }
+
+    /**
+     * Tells Trakt playback started, paused or stopped at [progress] percent. A stop at 80% or more
+     * adds it to your history; less, and Trakt keeps it as a paused position (Continue watching).
+     * Returns the HTTP code: 201 ok, 409 when Trakt already scrobbled it in the last few minutes.
+     */
+    fun scrobble(action: ScrobbleAction, target: ScrobbleTarget, progress: Double): Int {
+        val body = JSONObject().put("progress", progress.coerceIn(0.0, 100.0))
+        val show = JSONObject().put("ids", JSONObject().put("trakt", target.traktId))
+        if (target.episode == null) {
+            body.put("movie", show)
+        } else {
+            body.put("show", show)
+            body.put("episode", JSONObject().put("season", target.episode.first).put("number", target.episode.second))
+        }
+        return call("POST", "/scrobble/${action.path}", body, allowError = true).code
     }
 
     private fun JSONObject.tmdbId(): Int? = optJSONObject("ids")?.optInt("tmdb", 0)?.takeIf { it > 0 }

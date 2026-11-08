@@ -100,6 +100,16 @@ adb shell am start -n dev.craig.reel/.MainActivity --es trakt_client_id YOUR_ID
 
 3. On the TV: ⚙ → Link Trakt. It shows a short code; enter it at trakt.tv/activate on your phone or PC.
 
+### Sending what you watch to Trakt
+
+None of the streaming apps scrobble to Trakt on Google TV, so Reel does it. It reads what each app reports it's playing (the same notification access the YouTube row uses; see 3c for the adb command) and sends it to Trakt: after 3 minutes of play it's matched and shown as watching, and when you stop, anything 80% watched goes into your Trakt history. Anything less is saved as a paused position, which shows up in Continue watching. ⚙ → Trakt turns it on or off and shows the last thing it sent.
+
+What each app reports decides how well this works:
+
+- **Most apps** report the title, and for shows the season and episode. Reel matches that on Trakt.
+- **Prime Video** reports only its catalog id. Reel looks it up on primevideo.com. Prime reports no play position either, so progress is play time plus wherever Trakt last had it paused.
+- **Netflix** reports nothing but a play position. If you opened the title from Reel in the last 20 minutes, Reel assumes that's what is on; for a show, the next episode you haven't watched on Trakt, moving on when Netflix autoplays the next one. Anything you start from Netflix's own screens isn't seen. To fill those gaps, download your history at netflix.com → Account → Profile → Viewing activity → Download all, and import the CSV on Trakt.
+
 ## 3c. Link YouTube (optional)
 
 The YouTube row reads your subscription list with your own Google OAuth client:
@@ -157,3 +167,4 @@ When you're done with adb for the day, turn off Wireless debugging on the TV.
 - Title pages depend on JustWatch having a link for that app. When it doesn't (or JustWatch is down), Netflix, Tubi and YouTube get a search deep link; others get Android's standard search hand-off, or just open with a toast telling you what to search.
 - Niche genres depend on TMDB's community tagging. If a phrase finds nothing, try a variant ("post-apocalyptic future" vs "apocalypse").
 - Availability data is TMDB/JustWatch's and can lag a few days behind the services.
+- Scrobbling a Netflix show assumes you watch in order. If you skip ahead or rewatch an episode, Trakt gets the wrong one; fix it in your Trakt history.

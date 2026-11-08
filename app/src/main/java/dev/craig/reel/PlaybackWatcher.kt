@@ -15,7 +15,8 @@ import androidx.core.app.NotificationManagerCompat
 
 /**
  * Notices what the YouTube app is playing, so the subscriptions row knows what you've watched
- * and which channels you watch most. YouTube's API has no watch history, but the TV app
+ * and which channels you watch most. Streaming apps' sessions are passed on to [Scrobbler],
+ * which sends them to Trakt. YouTube's API has no watch history, but the TV app
  * publishes a media session with the video title, the channel, and whether it's playing.
  *
  * Reading other apps' media sessions needs notification-listener access. Google TV hides the
@@ -32,7 +33,10 @@ class PlaybackWatcher : NotificationListenerService() {
     private lateinit var prefs: Prefs
     private val main = Handler(Looper.getMainLooper())
     private var sessions: MediaSessionManager? = null
-    private val watching = HashMap<Session, MediaController.Callback>()
+    private val watching = HashMap<SessionKey, MediaController.Callback>()
+
+    /** Streaming apps' sessions go here, to scrobble to Trakt. */
+    private var scrobbler: Scrobbler? = null
 
     /** The video on screen now. */
     private var current: Playing? = null
@@ -56,6 +60,7 @@ class PlaybackWatcher : NotificationListenerService() {
 
     override fun onListenerConnected() {
         prefs = Prefs(this)
+        scrobbler = Scrobbler(prefs, main)
         val msm = getSystemService(MediaSessionManager::class.java) ?: return
         sessions = msm
         val me = ComponentName(this, PlaybackWatcher::class.java)
@@ -69,16 +74,13 @@ class PlaybackWatcher : NotificationListenerService() {
         for ((s, cb) in watching) s.controller.unregisterCallback(cb)
         watching.clear()
         main.removeCallbacks(tick)
-    }
-
-    /** A session is the same one across lists when its token matches; controllers are new objects each time. */
-    private class Session(val controller: MediaController) {
-        override fun equals(other: Any?) = other is Session && other.controller.sessionToken == controller.sessionToken
-        override fun hashCode() = controller.sessionToken.hashCode()
+        scrobbler?.close()
+        scrobbler = null
     }
 
     private fun track(controllers: List<MediaController>?) {
-        val now = controllers.orEmpty().filter { it.packageName in YOUTUBE_PACKAGES }.map { Session(it) }.toSet()
+        scrobbler?.track(controllers.orEmpty())
+        val now = controllers.orEmpty().filter { it.packageName in YOUTUBE_PACKAGES }.map { SessionKey(it) }.toSet()
         for (gone in watching.keys - now) {
             gone.controller.unregisterCallback(watching.remove(gone)!!)
         }

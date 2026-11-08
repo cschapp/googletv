@@ -2,6 +2,16 @@
 
 The version shows in Reel's ⚙ settings title. Newest first.
 
+## 1.2 — 2026-11-08
+
+### Added
+
+- **Send what you watch to Trakt**: what Netflix, Prime Video, Disney+, Max and the other streaming apps play goes into your Trakt history (80% or more) or Continue watching (less). Uses the same notification access as YouTube watch tracking. Prime Video titles are looked up by their catalog id; Netflix reports no title, so it only works for titles opened from Reel. ⚙ → Trakt turns it on or off and shows the last thing sent.
+
+### Changed
+
+- ⚙ → Trakt opens a small menu (sending to Trakt, unlink) once linked, instead of unlinking straight away.
+
 ## 1.1 — 2026-10-31
 
 ### Added

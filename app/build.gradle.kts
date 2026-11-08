@@ -11,6 +11,7 @@ val localProps = Properties().apply {
 }
 
 android {
+    testOptions.unitTests.isReturnDefaultValues = true
     namespace = "dev.craig.reel"
     compileSdk = 35
 
@@ -18,8 +19,8 @@ android {
         applicationId = "dev.craig.reel"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
         buildConfigField("String", "TMDB_KEY", "\"${localProps.getProperty("tmdb.key", "").trim()}\"")
         buildConfigField("String", "TRAKT_CLIENT_ID", "\"${localProps.getProperty("trakt.client_id", "").trim()}\"")
         buildConfigField("String", "TRAKT_CLIENT_SECRET", "\"${localProps.getProperty("trakt.client_secret", "").trim()}\"")
@@ -54,4 +55,5 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil:2.7.0")
+    testImplementation("junit:junit:4.13.2")
 }

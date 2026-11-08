@@ -156,6 +156,29 @@ class Prefs(ctx: Context) {
         get() = sp.getString("trakt_user", null) ?: ""
         set(v) = sp.edit().putString("trakt_user", v).apply()
 
+    /** Send what the streaming apps play to Trakt (needs a linked Trakt and notification access). */
+    var traktScrobble: Boolean
+        get() = sp.getBoolean("trakt_scrobble", true)
+        set(v) = sp.edit().putBoolean("trakt_scrobble", v).apply()
+
+    /** The title Reel last opened in an app, for apps that don't say what they're playing (Netflix). */
+    var launchHint: LaunchHint?
+        get() {
+            val parts = (sp.getString("launch_hint", null) ?: return null).split('\t')
+            if (parts.size < 5) return null
+            val type = if (parts[0] == MediaType.TV.path) MediaType.TV else MediaType.MOVIE
+            return LaunchHint(type, parts[1].toIntOrNull() ?: return null, parts[2], parts[3], parts[4].toLongOrNull() ?: 0L)
+        }
+        set(v) = sp.edit().putString(
+            "launch_hint",
+            v?.let { listOf(it.type.path, it.tmdbId, it.name.replace('\t', ' '), it.pkg, it.at).joinToString("\t") },
+        ).apply()
+
+    /** The last thing the scrobbler did, with when, for the settings screen. */
+    var lastScrobble: String
+        get() = sp.getString("last_scrobble", null) ?: ""
+        set(v) = sp.edit().putString("last_scrobble", v).apply()
+
     // ---------- YouTube subscriptions ----------
 
     var googleClientId: String
@@ -265,6 +288,9 @@ enum class ThumbSize(val label: String, val widthDp: Int) {
 
 /** A title you opened from Reel, and which app it went to. */
 data class RecentTitle(val title: Title, val app: String, val at: Long)
+
+/** Reel opened [tmdbId] in [pkg] at [at]. */
+data class LaunchHint(val type: MediaType, val tmdbId: Int, val name: String, val pkg: String, val at: Long)
 
 /** How discover-based rows are ordered. */
 enum class Sort(val label: String) {

@@ -1054,6 +1054,7 @@ class MainActivity : ComponentActivity() {
         }
         val firstEver = prefs.recentTitles.isEmpty()
         prefs.addRecentTitle(t, svc.label)
+        prefs.launchHint = LaunchHint(t.type, t.id, t.name, svc.pkg, System.currentTimeMillis())
         if (firstEver) rebuildGenreChoices()
     }
 
@@ -1538,13 +1539,60 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Settings → Trakt, once linked: scrobbling and unlinking. */
+    private fun showTraktMenu(t: Trakt) {
+        val listening = PlaybackWatcher.isEnabled(this)
+        val scrobbleLabel = when {
+            !prefs.traktScrobble -> "Send what I watch to Trakt: off"
+            !listening -> "Send what I watch to Trakt: needs notification access"
+            else -> "Send what I watch to Trakt: on"
+        }
+        val actions = listOf(
+            scrobbleLabel to { explainScrobbling() },
+            "Unlink Trakt (${prefs.traktUser.ifBlank { "linked" }})" to {
+                t.unlink()
+                toast("Trakt unlinked")
+                rebuildGenreChoices()
+                if (currentGenre?.trakt == true) selectGenre(GenreChoice.All)
+            },
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Trakt")
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .show()
+    }
+
+    private fun explainScrobbling() {
+        val on = prefs.traktScrobble
+        val listening = PlaybackWatcher.isEnabled(this)
+        val last = prefs.lastScrobble.ifBlank { "Nothing sent yet." }
+        val msg = buildString {
+            append(
+                "Reel tells Trakt what Netflix, Disney+, Max and your other streaming apps play, so it shows up " +
+                    "in your Trakt history. After 3 minutes of play it's matched on Trakt; when you stop, " +
+                    "anything 80% watched is added to your history, and anything less is saved as where to pick up.",
+            )
+            if (!listening) append("\n\nIt needs notification access, which Google TV hides. From your PC run:\n\n${PlaybackWatcher.GRANT_COMMAND}")
+            append("\n\nLast: $last")
+        }
+        AlertDialog.Builder(this)
+            .setTitle(if (on) "Sending to Trakt is on" else "Sending to Trakt is off")
+            .setMessage(msg)
+            .setPositiveButton(if (on) "Turn off" else "Turn on") { _, _ ->
+                prefs.traktScrobble = !on
+                toast(if (!on) "Sending what you watch to Trakt" else "Stopped sending to Trakt")
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
     // ---------- Settings ----------
 
     private fun showSettings() {
         val t = trakt()
         val traktLabel = when {
             t == null -> "Trakt (set up)"
-            t.isLinked -> "Unlink Trakt (${prefs.traktUser.ifBlank { "linked" }})"
+            t.isLinked -> "Trakt (${prefs.traktUser.ifBlank { "linked" }})"
             else -> "Link Trakt"
         }
         val place = prefs.weatherPlace?.takeIf { it.query == prefs.weatherQuery }
@@ -1582,12 +1630,7 @@ class MainActivity : ComponentActivity() {
                     }
                     3 -> when {
                         t == null -> linkTrakt()
-                        t.isLinked -> {
-                            t.unlink()
-                            toast("Trakt unlinked")
-                            rebuildGenreChoices()
-                            if (currentGenre?.trakt == true) selectGenre(GenreChoice.All)
-                        }
+                        t.isLinked -> showTraktMenu(t)
                         else -> linkTrakt()
                     }
                     4 -> if (youtubeLinked) unlinkYouTube() else linkYouTube()
